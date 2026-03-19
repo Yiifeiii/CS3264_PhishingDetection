@@ -16,16 +16,28 @@ source venv/bin/activate
 venv\Scripts\activate
 ```
 
-### 3. Install dependencies
+## 3. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 🚀 Run the Application
+## 4. Run the application
 ```bash
 python app.py
 ```
+
 This will:
 - Load the deepfake detection model
 - Run inference on sample images
 - Extract text using OCR
+- Analyze OCR text for phishing-related signals
+- Fuse image and text signals into a final phishing risk score
+
+## Current baseline
+
+The project now uses a simple multimodal phishing baseline:
+- Vision signal: pretrained deepfake/manipulation classifier
+- Text signal: OCR plus phishing keyword, URL, and email heuristics
+- Fusion: weighted combination into a low, medium, or high phishing risk score
+
+This is still a lightweight heuristic baseline, not a trained phishing classifier.
