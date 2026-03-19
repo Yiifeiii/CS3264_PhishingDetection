@@ -33,11 +33,16 @@ This will:
 - Analyze OCR text for phishing-related signals
 - Fuse image and text signals into a final phishing risk score
 
+Text risk now combines:
+- Rule heuristics (keywords + URL/email/phone/money patterns)
+- Pretrained phishing text model: `cybersectony/phishing-email-detection-distilbert_v2.4.1`
+- Systemic rule gating: model boosts risk only when minimum rule evidence exists
+
 ## Current baseline
 
-The project now uses a simple multimodal phishing baseline:
+The project now uses a multimodal phishing baseline:
 - Vision signal: pretrained deepfake/manipulation classifier
-- Text signal: OCR plus phishing keyword, URL, and email heuristics
+- Text signal: OCR plus heuristics and pretrained phishing-text model scoring
 - Fusion: weighted combination into a low, medium, or high phishing risk score
 
-This is still a lightweight heuristic baseline, not a trained phishing classifier.
+This is still a practical baseline. Thresholds and weights should be calibrated with your own dataset.

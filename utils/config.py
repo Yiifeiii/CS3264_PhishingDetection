@@ -5,8 +5,13 @@ class Config:
 
     # model
     DEEPFAKE_MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
+    TEXT_PHISHING_MODEL_NAME = "cybersectony/phishing-email-detection-distilbert_v2.4.1"
+    TEXT_MODEL_POSITIVE_CLASS_INDEX = 1
 
     # paths
+    RAW_IMAGE_DIR = "data/raw"
+    SUPPORTED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
     REAL_IMAGE = "data/raw/image1.jpg"
     FAKE_IMAGE = "data/raw/image3.jpg"
     SAMPLE_IMAGE = "data/raw/image2.jpg"
@@ -70,6 +75,9 @@ class Config:
     EMPTY_TEXT_PENALTY = 0.5
     MULTI_SIGNAL_BONUS = 0.08
     LINK_CREDENTIAL_BONUS = 0.1
+    TEXT_RULE_WEIGHT = 0.6
+    TEXT_MODEL_WEIGHT = 0.4
+    MODEL_POSITIVE_THRESHOLD = 0.6
 
     IMAGE_SCORE_WEIGHT = 0.35
     TEXT_SCORE_WEIGHT = 0.65

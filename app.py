@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from utils.config import Config
 from models.deepfake_model import DeepfakeModel
 from preprocess.image_preprocessor import ImagePreprocessor
@@ -37,7 +39,19 @@ class App:
         print("Phishing Risk:", fused_result)
 
     def run(self):
-        for path in self.cfg.SAMPLE_IMAGES:
+        image_dir = Path(self.cfg.RAW_IMAGE_DIR)
+        allowed_exts = {ext.lower() for ext in self.cfg.SUPPORTED_IMAGE_EXTENSIONS}
+
+        image_paths = sorted(
+            str(p) for p in image_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in allowed_exts
+        )
+
+        if not image_paths:
+            print(f"No images found in {image_dir}")
+            return
+
+        for path in image_paths:
             self.run_single(path)
 
 
