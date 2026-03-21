@@ -10,8 +10,8 @@ class App:
         self.cfg = Config()
 
         self.model = DeepfakeModel(
-            self.cfg.DEEPFAKE_MODEL_NAME,
-            self.cfg.DEVICE
+            model_path=self.cfg.DEEPFAKE_MODEL_PATH,
+            device=self.cfg.DEVICE
         )
 
         self.infer = InferenceService(self.model)
@@ -25,7 +25,9 @@ class App:
         text = self.ocr.extract_text(path)
 
         print(f"\nImage: {path}")
-        print("Prediction:", result)
+        print("Prediction:", result["prediction"])
+        print("Confidence:", round(result["confidence"], 4))
+        print("Probabilities:", result["probabilities"])
         print("OCR Text:", text)
 
     def run(self):
