@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import timm
+from PIL import Image
+from torchvision import transforms
 
 
 class FaceForgeNet(nn.Module):
@@ -35,6 +37,8 @@ class FaceForgeNet(nn.Module):
 
 
 class DeepfakeModel:
+    backend = "faceforge"
+
     def __init__(self, model_path: str, device: str):
         self.device = device
         self.model = FaceForgeNet(num_classes=2)
@@ -60,6 +64,16 @@ class DeepfakeModel:
             1: "fake"
         }
         self.label2id = {label: index for index, label in self.id2label.items()}
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.5, 0.5, 0.5],
+                    std=[0.5, 0.5, 0.5],
+                ),
+            ]
+        )
 
     def predict(self, image_tensor):
         image_tensor = image_tensor.to(self.device)
@@ -68,3 +82,17 @@ class DeepfakeModel:
             logits = self.model(image_tensor)
 
         return logits
+
+    def predict_image(self, image: Image.Image):
+        image_tensor = self.transform(image).unsqueeze(0)
+        logits = self.predict(image_tensor)
+        probabilities = torch.softmax(logits, dim=1)[0].cpu()
+        pred = int(torch.argmax(probabilities).item())
+        return {
+            "prediction": self.id2label[pred],
+            "confidence": float(probabilities[pred]),
+            "probabilities": {
+                self.id2label[idx]: float(probabilities[idx])
+                for idx in range(len(probabilities))
+            },
+        }

@@ -1,5 +1,8 @@
-from PIL import Image
+from PIL import Image, ImageOps
+
 
 class ImagePreprocessor:
     def load_image(self, path: str):
-        return Image.open(path).convert("RGB")
+        image = Image.open(path)
+        image = ImageOps.exif_transpose(image)
+        return image.convert("RGB")
