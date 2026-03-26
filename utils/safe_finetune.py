@@ -4,40 +4,59 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+from PIL import Image, ImageOps
 from sklearn.metrics import average_precision_score
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from models.safe_model import SAFE_ROOT, SafeModel
+from utils.benchmarking import DatasetSample
+from utils.dataset_splits import balanced_limit, build_train_val_samples, count_by_label
 
 
-def _import_safe_dataset():
+def _import_safe_transforms():
     safe_path = str(SAFE_ROOT)
     if safe_path not in sys.path:
         sys.path.insert(0, safe_path)
 
-    from data.datasets import TrainDataset  # pylint: disable=import-outside-toplevel
+    from data.datasets import Get_Transforms  # pylint: disable=import-outside-toplevel
 
-    return TrainDataset
+    return Get_Transforms
 
 
 def make_dataset_args(
-    train_data_path: str,
-    val_data_path: str,
     input_size: int,
     transform_mode: str,
-    num_train: int | None,
 ):
     return SimpleNamespace(
         input_size=input_size,
         transform_mode=transform_mode,
-        data_path=train_data_path,
-        eval_data_path=val_data_path,
-        num_train=num_train if num_train is not None else 10_000_000_000,
         jpeg_factor=None,
         blur_sigma=None,
         mask_ratio=None,
         mask_patch_size=None,
     )
+
+
+class SafeFolderDataset(Dataset):
+    def __init__(
+        self,
+        samples: list[DatasetSample],
+        transform,
+        limit: int | None = None,
+    ):
+        self.samples = balanced_limit(samples, limit)
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        sample = self.samples[index]
+        with Image.open(sample.path) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            tensor = self.transform(image)
+        target = 1 if sample.label == "fake" else 0
+        return tensor, torch.tensor(target, dtype=torch.long)
 
 
 def evaluate(model, data_loader, device):
@@ -84,19 +103,47 @@ def run_safe_finetune(args) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_args = make_dataset_args(
+    train_samples, val_samples, split_info = build_train_val_samples(
         train_data_path=args.train_data_path,
         val_data_path=args.val_data_path,
-        input_size=args.input_size,
-        transform_mode=args.transform_mode,
-        num_train=args.num_train,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
     )
 
-    train_dataset_cls = _import_safe_dataset()
-    train_dataset = train_dataset_cls(is_train=True, args=dataset_args)
-    val_dataset = train_dataset_cls(is_train=False, args=dataset_args)
+    dataset_args = make_dataset_args(
+        input_size=args.input_size,
+        transform_mode=args.transform_mode,
+    )
+    get_transforms = _import_safe_transforms()
+    train_transform, val_transform = get_transforms(dataset_args)
 
-    pin_memory = args.device != "cpu"
+    train_dataset = SafeFolderDataset(
+        samples=train_samples,
+        transform=train_transform,
+        limit=args.num_train,
+    )
+    val_dataset = SafeFolderDataset(
+        samples=val_samples,
+        transform=val_transform,
+        limit=args.num_val,
+    )
+    split_info["effective_train_counts"] = count_by_label(train_dataset.samples)
+    split_info["effective_val_counts"] = count_by_label(val_dataset.samples)
+    split_info["effective_train_size"] = len(train_dataset)
+    split_info["effective_val_size"] = len(val_dataset)
+    split_info["train_paths"] = [str(sample.path) for sample in train_dataset.samples]
+    split_info["val_paths"] = [str(sample.path) for sample in val_dataset.samples]
+
+    wrapper = SafeModel(
+        model_path=args.pretrained_path,
+        device=args.device,
+        input_size=args.input_size,
+        transform_mode=args.transform_mode,
+    )
+    model = wrapper.model
+    device = wrapper.device
+
+    pin_memory = device.startswith("cuda")
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -114,14 +161,6 @@ def run_safe_finetune(args) -> None:
         drop_last=False,
     )
 
-    wrapper = SafeModel(
-        model_path=args.pretrained_path,
-        device=args.device,
-        input_size=args.input_size,
-        transform_mode=args.transform_mode,
-    )
-    model = wrapper.model
-
     if args.freeze_backbone:
         for name, parameter in model.named_parameters():
             parameter.requires_grad = name.startswith("fc1")
@@ -137,14 +176,24 @@ def run_safe_finetune(args) -> None:
     best_accuracy = -1.0
     history = []
 
+    with open(output_dir / "split.json", "w", encoding="utf-8") as handle:
+        json.dump(split_info, handle, indent=2)
+
+    print(
+        f"Using device: {device}\n"
+        f"Split mode: {split_info['mode']}\n"
+        f"Train samples: {len(train_dataset)} ({split_info['effective_train_counts']})\n"
+        f"Val samples: {len(val_dataset)} ({split_info['effective_val_counts']})"
+    )
+
     for epoch in range(args.epochs):
         model.train()
         running_loss = 0.0
         seen = 0
 
         for images, targets in train_loader:
-            images = images.to(args.device)
-            targets = targets.to(args.device)
+            images = images.to(device)
+            targets = targets.to(device)
 
             optimizer.zero_grad()
             logits = model(images)
@@ -157,7 +206,7 @@ def run_safe_finetune(args) -> None:
             seen += batch_size
 
         train_loss = running_loss / seen if seen else 0.0
-        val_accuracy, val_ap = evaluate(model, val_loader, args.device)
+        val_accuracy, val_ap = evaluate(model, val_loader, device)
         metrics = {
             "epoch": epoch + 1,
             "train_loss": train_loss,

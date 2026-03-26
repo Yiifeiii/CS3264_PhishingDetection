@@ -12,6 +12,7 @@ from utils.benchmarking import (
     write_benchmark_csv,
 )
 from utils.config import Config
+from utils.distildire_finetune import run_distildire_finetune
 from utils.safe_finetune import run_safe_finetune
 
 
@@ -27,8 +28,19 @@ class App:
             self._ocr = OCRService()
         return self._ocr
 
-    def predict(self, model_name: str, image_path: str, include_ocr: bool = False) -> dict:
-        model = create_model(model_name, self.cfg)
+    def predict(
+        self,
+        model_name: str,
+        image_path: str,
+        include_ocr: bool = False,
+        distildire_model_path: str | None = None,
+        distildire_adm_model_path: str | None = None,
+    ) -> dict:
+        model = self._create_model(
+            model_name,
+            distildire_model_path=distildire_model_path,
+            distildire_adm_model_path=distildire_adm_model_path,
+        )
         image = self.preprocessor.load_image(image_path)
         result = model.predict_image(image)
 
@@ -42,6 +54,8 @@ class App:
         model_names: list[str],
         dataset_root: str,
         limit: int | None = None,
+        distildire_model_path: str | None = None,
+        distildire_adm_model_path: str | None = None,
     ) -> tuple[list[dict], dict[str, dict]]:
         samples = discover_labeled_images(dataset_root)
         if not samples:
@@ -57,12 +71,32 @@ class App:
         summary_by_model = {}
 
         for model_name in model_names:
-            model = create_model(model_name, self.cfg)
+            model = self._create_model(
+                model_name,
+                distildire_model_path=distildire_model_path,
+                distildire_adm_model_path=distildire_adm_model_path,
+            )
             model_rows = self._run_model_on_samples(model_name, model, samples)
             rows.extend(model_rows)
             summary_by_model[model_name] = summarize_predictions(model_rows)
 
         return rows, summary_by_model
+
+    def _create_model(
+        self,
+        model_name: str,
+        distildire_model_path: str | None = None,
+        distildire_adm_model_path: str | None = None,
+    ):
+        if model_name == "distildire":
+            return create_model(
+                model_name,
+                self.cfg,
+                model_path=distildire_model_path,
+                adm_model_path=distildire_adm_model_path,
+            )
+
+        return create_model(model_name, self.cfg)
 
     def _run_model_on_samples(
         self,
@@ -113,6 +147,16 @@ def parse_args(cfg: Config):
         action="store_true",
         help="Run OCR on the image and print the extracted text.",
     )
+    predict_parser.add_argument(
+        "--distildire-model-path",
+        default=None,
+        help="Optional DistilDIRE checkpoint override for predict.",
+    )
+    predict_parser.add_argument(
+        "--distildire-adm-model-path",
+        default=None,
+        help="Optional ADM checkpoint override for DistilDIRE predict.",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
@@ -146,6 +190,16 @@ def parse_args(cfg: Config):
         action="store_true",
         help="Print per-image predictions after the summary table.",
     )
+    benchmark_parser.add_argument(
+        "--distildire-model-path",
+        default=None,
+        help="Optional DistilDIRE checkpoint override for benchmark.",
+    )
+    benchmark_parser.add_argument(
+        "--distildire-adm-model-path",
+        default=None,
+        help="Optional ADM checkpoint override for DistilDIRE benchmark.",
+    )
 
     finetune_parser = subparsers.add_parser(
         "finetune-safe",
@@ -154,12 +208,12 @@ def parse_args(cfg: Config):
     finetune_parser.add_argument(
         "--train-data-path",
         required=True,
-        help="Path to the training dataset root containing 0_real/1_fake folders.",
+        help="Path to the training dataset root containing real/fake or 0_real/1_fake folders.",
     )
     finetune_parser.add_argument(
         "--val-data-path",
         required=True,
-        help="Path to the validation dataset root containing 0_real/1_fake folders.",
+        help="Path to the validation dataset root containing real/fake or 0_real/1_fake folders.",
     )
     finetune_parser.add_argument(
         "--output-dir",
@@ -176,6 +230,12 @@ def parse_args(cfg: Config):
     finetune_parser.add_argument("--lr", type=float, default=1e-4)
     finetune_parser.add_argument("--weight-decay", type=float, default=1e-4)
     finetune_parser.add_argument("--num-workers", type=int, default=2)
+    finetune_parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=cfg.SAFE_VAL_RATIO,
+        help="Validation ratio used when train and val paths point to the same root.",
+    )
     finetune_parser.add_argument("--input-size", type=int, default=cfg.SAFE_INPUT_SIZE)
     finetune_parser.add_argument(
         "--transform-mode",
@@ -183,12 +243,84 @@ def parse_args(cfg: Config):
         choices=["crop", "resize_BILINEAR", "resize_NEAREST", "source"],
     )
     finetune_parser.add_argument("--num-train", type=int, default=None)
+    finetune_parser.add_argument("--num-val", type=int, default=None)
     finetune_parser.add_argument("--device", default=cfg.DEVICE)
     finetune_parser.add_argument("--seed", type=int, default=42)
     finetune_parser.add_argument(
         "--freeze-backbone",
         action="store_true",
         help="Freeze the SAFE backbone and train only the classifier head.",
+    )
+
+    distildire_finetune_parser = subparsers.add_parser(
+        "finetune-distildire",
+        help="Fine-tune DistilDIRE on a local labeled dataset.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--train-data-path",
+        default=cfg.DISTILDIRE_FINETUNE_TRAIN_PATH,
+        help="Path to the training dataset root containing real/fake folders.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--val-data-path",
+        default=cfg.DISTILDIRE_FINETUNE_VAL_PATH,
+        help="Path to the validation dataset root containing real/fake folders.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--output-dir",
+        default=cfg.DISTILDIRE_FINETUNE_OUTPUT_DIR,
+        help="Directory to save fine-tuned checkpoints.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--pretrained-path",
+        default=cfg.DISTILDIRE_MODEL_PATH,
+        help="DistilDIRE checkpoint used to initialize fine-tuning.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--adm-model-path",
+        default=cfg.DISTILDIRE_ADM_MODEL_PATH,
+        help="ADM diffusion checkpoint used to compute first-step noise.",
+    )
+    distildire_finetune_parser.add_argument("--epochs", type=int, default=3)
+    distildire_finetune_parser.add_argument("--batch-size", type=int, default=4)
+    distildire_finetune_parser.add_argument("--lr", type=float, default=1e-4)
+    distildire_finetune_parser.add_argument("--weight-decay", type=float, default=1e-4)
+    distildire_finetune_parser.add_argument("--num-workers", type=int, default=0)
+    distildire_finetune_parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=cfg.DISTILDIRE_VAL_RATIO,
+        help="Validation ratio used when train and val paths point to the same root.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--input-size",
+        type=int,
+        default=cfg.DISTILDIRE_IMAGE_SIZE,
+    )
+    distildire_finetune_parser.add_argument(
+        "--fake-threshold",
+        type=float,
+        default=cfg.DISTILDIRE_FAKE_THRESHOLD,
+        help="Probability threshold used for validation metrics and predictions.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--num-train",
+        type=int,
+        default=None,
+        help="Optional cap on training images with balanced label sampling.",
+    )
+    distildire_finetune_parser.add_argument(
+        "--num-val",
+        type=int,
+        default=None,
+        help="Optional cap on validation images with balanced label sampling.",
+    )
+    distildire_finetune_parser.add_argument("--device", default=cfg.DEVICE)
+    distildire_finetune_parser.add_argument("--seed", type=int, default=42)
+    distildire_finetune_parser.add_argument(
+        "--freeze-backbone",
+        action="store_true",
+        help="Freeze the DistilDIRE backbone and train only the student head.",
     )
 
     return parser.parse_args()
@@ -222,7 +354,13 @@ def main():
     app = App()
 
     if args.command == "predict":
-        result = app.predict(args.model, args.image, include_ocr=args.ocr)
+        result = app.predict(
+            args.model,
+            args.image,
+            include_ocr=args.ocr,
+            distildire_model_path=args.distildire_model_path,
+            distildire_adm_model_path=args.distildire_adm_model_path,
+        )
         print_prediction(args.image, args.model, result)
         return
 
@@ -230,10 +368,16 @@ def main():
         run_safe_finetune(args)
         return
 
+    if args.command == "finetune-distildire":
+        run_distildire_finetune(args)
+        return
+
     rows, summary_by_model = app.benchmark(
         model_names=args.models,
         dataset_root=args.dataset_root,
         limit=args.limit,
+        distildire_model_path=args.distildire_model_path,
+        distildire_adm_model_path=args.distildire_adm_model_path,
     )
 
     print(format_summary_table(summary_by_model))

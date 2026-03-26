@@ -121,32 +121,50 @@ class DistilDireModel:
 
     def _load_student_weights(self, model_path: str) -> None:
         checkpoint = torch.load(model_path, map_location="cpu")
-        state_dict = checkpoint["model"] if isinstance(checkpoint, dict) else checkpoint
+        if isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        elif isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
         state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
         self.model.load_state_dict(state_dict)
 
-    def predict_image(self, image: Image.Image | str | Path) -> dict:
+    def preprocess_image(self, image: Image.Image | str | Path) -> torch.Tensor:
         if isinstance(image, (str, Path)):
             pil_image = Image.open(image)
         else:
             pil_image = image
-
-        image_tensor = prepare_distildire_input(
+        return prepare_distildire_input(
             pil_image,
             image_size=self.image_size,
-        ).unsqueeze(0).to(self.device)
+        )
+
+    def compute_eps(self, image_batch: torch.Tensor) -> torch.Tensor:
+        return self._dire_get_first_step_noise(
+            image_batch,
+            self.adm_model,
+            self.diffusion,
+            self.args,
+            self.device,
+        )
+
+    def forward_logits(
+        self,
+        image_batch: torch.Tensor,
+        eps_batch: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        image_batch = image_batch.to(self.device)
+        if eps_batch is None:
+            eps_batch = self.compute_eps(image_batch)
+        output = self.model(image_batch, eps_batch)
+        return output["logit"].view(-1)
+
+    def predict_image(self, image: Image.Image | str | Path) -> dict:
+        image_tensor = self.preprocess_image(image).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            eps = self._dire_get_first_step_noise(
-                image_tensor,
-                self.adm_model,
-                self.diffusion,
-                self.args,
-                self.device,
-            )
-            fake_probability = float(
-                self.model(image_tensor, eps)["logit"].sigmoid().item()
-            )
+            fake_probability = float(self.forward_logits(image_tensor).sigmoid().item())
 
         return build_distildire_result(fake_probability, self.fake_threshold)
 

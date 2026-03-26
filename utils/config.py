@@ -14,6 +14,7 @@ class Config:
     SAFE_MODEL_PATH = "external/SAFE/checkpoint/checkpoint-best.pth"
     SAFE_INPUT_SIZE = 256
     SAFE_TRANSFORM_MODE = "crop"
+    SAFE_VAL_RATIO = 0.1
     SAFE_FINETUNE_TRAIN_PATH = "data/datasets/train_ForenSynths/train"
     SAFE_FINETUNE_VAL_PATH = "data/datasets/train_ForenSynths/val"
     SAFE_FINETUNE_OUTPUT_DIR = "results/SAFE"
@@ -23,6 +24,10 @@ class Config:
     DISTILDIRE_ADM_MODEL_PATH = "models/distildire/256x256_diffusion_uncond.pt"
     DISTILDIRE_IMAGE_SIZE = 256
     DISTILDIRE_FAKE_THRESHOLD = 0.2
+    DISTILDIRE_VAL_RATIO = 0.1
+    DISTILDIRE_FINETUNE_TRAIN_PATH = "data/raw"
+    DISTILDIRE_FINETUNE_VAL_PATH = "data/raw"
+    DISTILDIRE_FINETUNE_OUTPUT_DIR = "results/DISTILDIRE"
 
     # paths
     REAL_IMAGE = "data/raw/real/image1.jpg"
