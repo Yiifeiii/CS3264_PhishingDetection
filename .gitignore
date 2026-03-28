@@ -27,3 +27,4 @@ models/**/*.safetensors
 # Runtime caches and logs
 .cache/
 *.log
+data/

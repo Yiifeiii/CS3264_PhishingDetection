@@ -7,10 +7,13 @@ class Config:
     DEEPFAKE_MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
     TEXT_PHISHING_MODEL_NAME = "cybersectony/phishing-email-detection-distilbert_v2.4.1"
     TEXT_MODEL_POSITIVE_CLASS_INDEX = 1
+    CHINESE_TO_ENGLISH_MODEL_NAME = "Helsinki-NLP/opus-mt-zh-en"
 
     # paths
     RAW_IMAGE_DIR = "data/raw"
     SUPPORTED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+    OCR_LANGUAGES = ("en", "ch_sim")
+    OCR_CHINESE_POLICY = "strip"  # valid options: "strip", "skip", "translate"
 
     REAL_IMAGE = "data/raw/image1.jpg"
     FAKE_IMAGE = "data/raw/image3.jpg"
