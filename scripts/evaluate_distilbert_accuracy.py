@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Print up to N Chinese-containing OCR samples after processing.",
     )
+    parser.add_argument(
+        "--show-used-images",
+        action="store_true",
+        help="Print all images that were included in the accuracy calculation.",
+    )
     return parser.parse_args()
 
 
@@ -67,6 +72,11 @@ def collect_images(root: Path, limit: int | None) -> list[Path]:
     if limit is not None:
         files = files[:limit]
     return files
+
+
+def safe_console_text(text: str) -> str:
+    normalized = str(text)
+    return normalized.encode("cp1252", errors="backslashreplace").decode("cp1252")
 
 
 def main() -> int:
@@ -98,6 +108,7 @@ def main() -> int:
     y_pred: list[int] = []
     mistakes: list[dict[str, object]] = []
     skipped_no_text: list[str] = []
+    used_images: list[str] = []
     chinese_hits = 0
     translated_count = 0
     stripped_count = 0
@@ -134,6 +145,7 @@ def main() -> int:
         result = analyzer.analyze(text)
         score = float(result.get("model_score") or 0.0)
         pred = 1 if score >= threshold else 0
+        used_images.append(str(image_path))
 
         y_true.append(label)
         y_pred.append(pred)
@@ -147,6 +159,8 @@ def main() -> int:
                     "model_score": score,
                     "model_score_raw": result.get("model_score_raw"),
                     "text_preview": (text[:160] + "...") if len(text) > 160 else text,
+                    "filtered_preview": ((result.get("filtered_text") or "")[:160] + "...") if len(result.get("filtered_text") or "") > 160 else (result.get("filtered_text") or ""),
+                    "kept_chunks": result.get("relevant_chunks") or [],
                 }
             )
 
@@ -190,6 +204,11 @@ def main() -> int:
                 f"| score={item['model_score']:.4f} raw={item['model_score_raw']} "
                 f"| text={item['text_preview']}"
             )
+            if item['filtered_preview']:
+                print(f"  filtered={safe_console_text(item['filtered_preview'])}")
+            kept_chunks = item.get('kept_chunks') or []
+            if kept_chunks:
+                print(f"  kept_chunks={safe_console_text(' | '.join(kept_chunks[:3]))}")
 
     if skipped_no_text:
         print()
@@ -208,8 +227,20 @@ def main() -> int:
         print("Chinese OCR sample previews:")
         for sample in chinese_samples:
             print(f"- {sample['path']} | action={sample['action']}")
-            print(f"  raw: {sample['raw_text']}")
-            print(f"  processed: {sample['processed_text']}")
+            print(f"  raw: {safe_console_text(sample['raw_text'])}")
+            print(f"  processed: {safe_console_text(sample['processed_text'])}")
+
+    if args.show_used_images:
+        print()
+        print("Images used for accuracy:")
+        for path in used_images:
+            print(f"- {path}")
+
+        if skipped_no_text:
+            print()
+            print("Images skipped from accuracy:")
+            for path in skipped_no_text:
+                print(f"- {path}")
 
     return 0
 

@@ -8,6 +8,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, MarianTokenizer
 class OCRTextProcessor:
     CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
     MULTISPACE_PATTERN = re.compile(r"\s+")
+    TOKEN_PATTERN = re.compile(r"\S+")
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -34,10 +35,11 @@ class OCRTextProcessor:
 
         contains_chinese = bool(self.CHINESE_PATTERN.search(normalized))
         if not contains_chinese:
+            cleaned = self._clean_ocr_text(normalized)
             return {
-                "text": normalized,
+                "text": cleaned,
                 "contains_chinese": False,
-                "action": "kept",
+                "action": "cleaned",
                 "warning": None,
             }
 
@@ -51,6 +53,7 @@ class OCRTextProcessor:
 
         if self.policy == "strip":
             stripped = self._strip_chinese(normalized)
+            stripped = self._clean_ocr_text(stripped)
             if stripped:
                 return {
                     "text": stripped,
@@ -66,6 +69,7 @@ class OCRTextProcessor:
             }
 
         translated = self._translate(normalized)
+        translated = self._clean_ocr_text(translated or "")
         if translated:
             return {
                 "text": translated,
@@ -122,3 +126,49 @@ class OCRTextProcessor:
     def _strip_chinese(self, text: str) -> str:
         without_chinese = self.CHINESE_PATTERN.sub(" ", text)
         return self.MULTISPACE_PATTERN.sub(" ", without_chinese).strip()
+
+    def _clean_ocr_text(self, text: str) -> str:
+        if not text:
+            return ""
+
+        kept_tokens = []
+        for token in self.TOKEN_PATTERN.findall(text):
+            cleaned = self._clean_token(token)
+            if cleaned:
+                kept_tokens.append(cleaned)
+
+        normalized = " ".join(kept_tokens)
+        normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+        return self.MULTISPACE_PATTERN.sub(" ", normalized).strip()
+
+    def _clean_token(self, token: str) -> str:
+        token = token.strip()
+        if not token:
+            return ""
+
+        # Keep URLs, emails, and phone-like tokens intact since they are strong phishing signals.
+        lowered = token.lower()
+        if any(marker in lowered for marker in ("http://", "https://", "www.", "@")):
+            return token
+        if re.fullmatch(r"[+\d][\d\s-]{5,}", token):
+            return token
+
+        cleaned = re.sub(r"^[^A-Za-z0-9$+]+|[^A-Za-z0-9$+]+$", "", token)
+        if not cleaned:
+            return ""
+
+        alnum_count = sum(char.isalnum() for char in cleaned)
+        alpha_count = sum(char.isalpha() for char in cleaned)
+        digit_count = sum(char.isdigit() for char in cleaned)
+        symbol_count = len(cleaned) - alnum_count
+
+        if alnum_count == 0:
+            return ""
+        if len(cleaned) <= 2 and alpha_count == 0:
+            return ""
+        if len(cleaned) <= 3 and alpha_count <= 1 and digit_count >= 1:
+            return ""
+        if symbol_count > max(2, alnum_count):
+            return ""
+
+        return cleaned

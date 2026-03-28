@@ -19,7 +19,9 @@ class TextRiskAnalyzer:
 
     def analyze(self, text: str):
         normalized = (text or "").strip()
-        lowered = normalized.lower()
+        relevant_chunks, dropped_chunks = self._select_relevant_chunks(normalized)
+        filtered_text = " ".join(relevant_chunks).strip()
+        lowered = filtered_text.lower()
         denoised = self._denoise_for_keywords(lowered)
 
         matched_groups = {}
@@ -31,10 +33,10 @@ class TextRiskAnalyzer:
                 matched_groups[group_name] = hits
                 total_hits += len(hits)
 
-        urls = self.URL_PATTERN.findall(normalized)
-        emails = self.EMAIL_PATTERN.findall(normalized)
-        phone_numbers = self.PHONE_PATTERN.findall(normalized)
-        money_mentions = self.MONEY_PATTERN.findall(normalized)
+        urls = self.URL_PATTERN.findall(filtered_text)
+        emails = self.EMAIL_PATTERN.findall(filtered_text)
+        phone_numbers = self.PHONE_PATTERN.findall(filtered_text)
+        money_mentions = self.MONEY_PATTERN.findall(filtered_text)
 
         rule_score = 0.0
         rule_score += min(total_hits * self.cfg.KEYWORD_HIT_WEIGHT, 0.6)
@@ -60,12 +62,12 @@ class TextRiskAnalyzer:
         if ("credential_request" in matched_groups) and (urls or emails):
             rule_score += self.cfg.LINK_CREDENTIAL_BONUS
 
-        if not normalized:
+        if not filtered_text:
             rule_score *= self.cfg.EMPTY_TEXT_PENALTY
 
         rule_score = min(rule_score, 1.0)
 
-        model_chunks = self._split_text_for_model(normalized)
+        model_chunks = self._split_text_for_model(filtered_text)
         chunk_scores = []
         for chunk in model_chunks:
             prob = self.model.predict_phishing_probability(chunk)
@@ -113,6 +115,10 @@ class TextRiskAnalyzer:
             reasons.append("text model loaded but no usable text for inference")
         else:
             reasons.append("text model unavailable; heuristic-only text scoring")
+        if relevant_chunks:
+            reasons.append(f"relevance filter kept {len(relevant_chunks)} chunk(s)")
+        if dropped_chunks:
+            reasons.append(f"relevance filter dropped {len(dropped_chunks)} chunk(s)")
         warnings = []
         if model_score is not None and model_score >= 0.6 and rule_score < 0.18:
             warnings.append("model indicates phishing but rule signals are weak")
@@ -131,6 +137,10 @@ class TextRiskAnalyzer:
             "model_loaded": self.model.is_loaded,
             "model_chunks_evaluated": len(chunk_scores),
             "model_best_chunk": best_chunk,
+            "input_text": normalized,
+            "filtered_text": filtered_text,
+            "relevant_chunks": relevant_chunks,
+            "dropped_chunks": dropped_chunks,
             "warnings": warnings,
             "keyword_groups": matched_groups,
             "urls": urls,
@@ -163,6 +173,95 @@ class TextRiskAnalyzer:
         if score <= threshold:
             return 0.0
         return min((score - threshold) / (1.0 - threshold), 1.0)
+
+    def _select_relevant_chunks(self, text: str):
+        normalized = (text or "").strip()
+        if not normalized:
+            return [], []
+
+        chunks = self._candidate_relevance_chunks(normalized)
+        scored = []
+        for chunk in chunks:
+            score = self._score_chunk_relevance(chunk)
+            scored.append((chunk, score))
+
+        kept = [
+            chunk for chunk, score in scored
+            if score >= self.cfg.TEXT_RELEVANCE_MIN_SCORE
+        ]
+        kept = kept[:self.cfg.TEXT_RELEVANCE_MAX_CHUNKS]
+
+        if not kept and scored:
+            best_chunk, best_score = max(scored, key=lambda item: item[1])
+            if best_score > 0:
+                kept = [best_chunk]
+
+        kept_keys = {chunk.lower() for chunk in kept}
+        dropped = [chunk for chunk, _ in scored if chunk.lower() not in kept_keys]
+        return kept, dropped
+
+    def _candidate_relevance_chunks(self, text: str):
+        chunks = []
+        chunks.extend([
+            seg.strip()
+            for seg in re.split(r"[.!?;\n]+", text)
+            if seg.strip()
+        ])
+
+        tokens = text.split()
+        window = 12
+        stride = 6
+        if len(tokens) > window:
+            for i in range(0, len(tokens), stride):
+                piece = " ".join(tokens[i:i + window]).strip()
+                if piece:
+                    chunks.append(piece)
+
+        deduped = []
+        seen = set()
+        for chunk in chunks:
+            key = chunk.lower()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(chunk)
+        return deduped
+
+    def _score_chunk_relevance(self, chunk: str):
+        lowered = chunk.lower()
+        denoised = self._denoise_for_keywords(lowered)
+        score = 0.0
+
+        for term in self.cfg.TEXT_RELEVANCE_STRONG_SIGNALS:
+            if term in lowered or term in denoised:
+                score += 2.0
+        for term in self.cfg.TEXT_RELEVANCE_WEAK_SIGNALS:
+            if term in lowered or term in denoised:
+                score += 0.75
+        for term in self.cfg.TEXT_RELEVANCE_NOISE_HINTS:
+            if term in lowered or term in denoised:
+                score -= 1.5
+
+        if self.URL_PATTERN.search(chunk):
+            score += 2.5
+        if self.EMAIL_PATTERN.search(chunk):
+            score += 2.0
+        if self.PHONE_PATTERN.search(chunk):
+            score += 2.0
+        if self.MONEY_PATTERN.search(chunk):
+            score += 1.5
+
+        token_count = len(chunk.split())
+        if token_count < 3:
+            score -= 1.5
+        elif token_count > 25:
+            score -= 0.5
+
+        alpha_count = sum(ch.isalpha() for ch in chunk)
+        junk_count = len(re.findall(r"[^A-Za-z0-9\s\u4e00-\u9fff.,:;!?$%&@()+/\-_'\"]", chunk))
+        if alpha_count and junk_count > alpha_count * 0.2:
+            score -= 1.0
+
+        return score
 
     def _split_text_for_model(self, text: str):
         normalized = (text or "").strip()

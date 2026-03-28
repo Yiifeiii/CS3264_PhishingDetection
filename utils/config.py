@@ -81,6 +81,24 @@ class Config:
     TEXT_RULE_WEIGHT = 0.6
     TEXT_MODEL_WEIGHT = 0.4
     MODEL_POSITIVE_THRESHOLD = 0.6
+    TEXT_RELEVANCE_MIN_SCORE = 2.0
+    TEXT_RELEVANCE_MAX_CHUNKS = 5
+    TEXT_RELEVANCE_STRONG_SIGNALS = (
+        "urgent", "verify", "verification", "identity", "account", "password", "otp",
+        "pin", "login", "sign in", "click", "link", "reset", "update", "confirm",
+        "whatsapp", "bank", "payment", "refund", "invoice", "claim", "reward",
+        "bonus", "free", "gift", "prize", "frozen", "suspended", "expired",
+        "singpass", "iras", "cpf", "limited", "action required", "official notice",
+    )
+    TEXT_RELEVANCE_WEAK_SIGNALS = (
+        "call", "message", "now", "today", "immediately", "security", "alert",
+        "notice", "government", "profile", "transaction", "money", "cash",
+    )
+    TEXT_RELEVANCE_NOISE_HINTS = (
+        "channelnewsasia", "mothership", "straits times", "cna", "readmore",
+        "prime minister", "singapore", "exclusive", "breaking", "news",
+        "cabinet", "leadership", "diplomatic", "community chest",
+    )
 
     IMAGE_SCORE_WEIGHT = 0.35
     TEXT_SCORE_WEIGHT = 0.65
