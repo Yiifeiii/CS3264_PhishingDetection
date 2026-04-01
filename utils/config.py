@@ -15,6 +15,38 @@ class Config:
     OCR_LANGUAGES = ("en", "ch_sim")
     OCR_CHINESE_POLICY = "strip"  # valid options: "strip", "skip", "translate"
 
+    # Allowlisted contacts suppress email/phone phishing heuristics but do not
+    # hard-mark the sample as safe. Keep these lists tight and review them.
+    TRUSTED_EMAIL_ADDRESSES = (
+        "info@tech.gov.sg",
+        "media@tech.gov.sg",
+        "whistleblow@tech.gov.sg",
+        "contact@ns.gov.sg",
+    )
+    TRUSTED_EMAIL_DOMAINS = (
+        "gov.sg",
+    )
+    TRUSTED_PHONE_NUMBERS = (
+        "1799",
+        "62110888",
+        "6562110888",
+        "63353533",
+        "6563353533",
+        "18002550000",
+        "18003568300",
+        "6563568300",
+        "18002271188",
+        "6562271188",
+        "18002223399",
+        "18002263866",
+        "18003676767",
+        "65676767",
+    )
+    TRUSTED_URL_DOMAINS = (
+        "gov.sg",
+    )
+    MASK_TRUSTED_CONTACTS_FOR_MODEL = True
+
     REAL_IMAGE = "data/raw/image1.jpg"
     FAKE_IMAGE = "data/raw/image3.jpg"
     SAMPLE_IMAGE = "data/raw/image2.jpg"

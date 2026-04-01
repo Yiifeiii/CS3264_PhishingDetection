@@ -36,6 +36,8 @@ This will:
 Text risk now combines:
 - OCR preprocessing for screenshot text
 - OCR text cleanup and Chinese handling (`strip`, `skip`, or `translate`)
+- trusted-contact allowlist support for official emails and phone numbers
+- trusted government-site allowlist support for official URLs
 - Relevance filtering to keep scam-indicative chunks and drop background/news noise
 - Rule heuristics (keywords + URL/email/phone/money patterns)
 - Pretrained phishing text model: `cybersectony/phishing-email-detection-distilbert_v2.4.1`
@@ -69,6 +71,7 @@ To make the text classifier more reliable, the project now applies multiple clea
 2. OCR text preprocessing
    - Clean noisy OCR tokens
    - Preserve useful patterns like URLs, emails, phone numbers, and money mentions
+   - Allowlist trusted government-site domains, trusted email domains, exact email addresses, and exact phone numbers so they do not raise heuristic risk on their own
    - Handle Chinese text with one of three modes:
      - `strip`: remove Chinese characters but keep the rest of the OCR text
      - `skip`: skip the text if Chinese is detected
@@ -80,8 +83,22 @@ To make the text classifier more reliable, the project now applies multiple clea
    - Drop low-value chunks such as news/location/background text
 4. Text scoring
    - Rule-based phishing indicators
+   - Trusted government sites and trusted contacts removed from URL/email/phone heuristic boosts
+   - Trusted government sites and contacts optionally masked before phishing-model scoring
    - DistilBERT phishing-text probability
    - Weighted combination into final text risk
+
+### Trusted contact allowlist
+
+You can configure known-safe contacts in `utils/config.py`:
+
+- `TRUSTED_EMAIL_ADDRESSES`: exact email addresses
+- `TRUSTED_EMAIL_DOMAINS`: domain suffixes such as `gov.sg`
+- `TRUSTED_PHONE_NUMBERS`: exact phone numbers after normalization
+- `TRUSTED_URL_DOMAINS`: trusted site domains such as `gov.sg`
+- `MASK_TRUSTED_CONTACTS_FOR_MODEL`: replace trusted contacts with placeholders before model scoring
+
+The seeded defaults now include a small Singapore-government allowlist based on official public contact pages. These entries suppress the URL/email/phone heuristic boosts, but they do not force the sample to be classified as safe if the rest of the text still looks suspicious.
 
 ### Pipeline diagram
 

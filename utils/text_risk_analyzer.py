@@ -1,13 +1,15 @@
 import re
+from urllib.parse import urlsplit
 
 from utils.text_model_service import TextModelService
 
 
 class TextRiskAnalyzer:
-    URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+|\b[a-zA-Z0-9-]+\.(?:com|net|org|io|co|ru|cn|xyz)\b)")
+    URL_PATTERN = re.compile(r"(https?://[^\s]+|www\.[^\s]+|\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/[^\s]*)?\b)")
     EMAIL_PATTERN = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
-    PHONE_PATTERN = re.compile(r"(\+\d{1,3}[\s-]?\d{4,14}|\b\d{8,14}\b)")
+    PHONE_CANDIDATE_PATTERN = re.compile(r"(?:\+\d[\d\s-]{3,20}\d|\b\d[\d\s-]{3,20}\d\b|\b\d{3,4}\b)")
     MONEY_PATTERN = re.compile(r"(\$\s?\d+(?:[\.,]\d{1,2})?|\b\d+(?:[\.,]\d{1,2})?\s?(?:usd|sgd|rm)\b)", re.IGNORECASE)
+    SENTENCE_SPLIT_PATTERN = re.compile(r"(?:[!?;]|\.(?=\s)|\n)+")
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -16,6 +18,26 @@ class TextRiskAnalyzer:
             cfg.DEVICE,
             cfg.TEXT_MODEL_POSITIVE_CLASS_INDEX,
         )
+        self.trusted_email_addresses = {
+            self._normalize_email(email)
+            for email in getattr(cfg, "TRUSTED_EMAIL_ADDRESSES", ())
+            if self._normalize_email(email)
+        }
+        self.trusted_email_domains = {
+            self._normalize_domain(domain)
+            for domain in getattr(cfg, "TRUSTED_EMAIL_DOMAINS", ())
+            if self._normalize_domain(domain)
+        }
+        self.trusted_phone_numbers = {
+            self._normalize_phone_number(phone)
+            for phone in getattr(cfg, "TRUSTED_PHONE_NUMBERS", ())
+            if self._normalize_phone_number(phone)
+        }
+        self.trusted_url_domains = {
+            self._normalize_domain(domain)
+            for domain in getattr(cfg, "TRUSTED_URL_DOMAINS", ())
+            if self._normalize_domain(domain)
+        }
 
     def analyze(self, text: str):
         normalized = (text or "").strip()
@@ -33,9 +55,12 @@ class TextRiskAnalyzer:
                 matched_groups[group_name] = hits
                 total_hits += len(hits)
 
-        urls = self.URL_PATTERN.findall(filtered_text)
-        emails = self.EMAIL_PATTERN.findall(filtered_text)
-        phone_numbers = self.PHONE_PATTERN.findall(filtered_text)
+        detected_urls = self._extract_urls(filtered_text)
+        detected_emails = self.EMAIL_PATTERN.findall(filtered_text)
+        detected_phone_numbers = self._extract_phone_numbers(filtered_text)
+        trusted_urls, urls = self._partition_trusted_urls(detected_urls)
+        trusted_emails, emails = self._partition_trusted_emails(detected_emails)
+        trusted_phone_numbers, phone_numbers = self._partition_trusted_phone_numbers(detected_phone_numbers)
         money_mentions = self.MONEY_PATTERN.findall(filtered_text)
 
         rule_score = 0.0
@@ -67,7 +92,17 @@ class TextRiskAnalyzer:
 
         rule_score = min(rule_score, 1.0)
 
-        model_chunks = self._split_text_for_model(filtered_text)
+        model_input_text = filtered_text
+        masked_trusted_contacts = []
+        if getattr(self.cfg, "MASK_TRUSTED_CONTACTS_FOR_MODEL", False):
+            model_input_text, masked_trusted_contacts = self._mask_trusted_contacts_for_model(
+                filtered_text,
+                trusted_urls,
+                trusted_emails,
+                trusted_phone_numbers,
+            )
+
+        model_chunks = self._split_text_for_model(model_input_text)
         chunk_scores = []
         for chunk in model_chunks:
             prob = self.model.predict_phishing_probability(chunk)
@@ -100,6 +135,14 @@ class TextRiskAnalyzer:
             reasons.append("email address detected in image text")
         if phone_numbers:
             reasons.append("phone number detected in image text")
+        if trusted_urls:
+            reasons.append("trusted government site ignored for heuristic scoring")
+        if trusted_emails:
+            reasons.append("trusted email/domain ignored for heuristic scoring")
+        if trusted_phone_numbers:
+            reasons.append("trusted phone number ignored for heuristic scoring")
+        if masked_trusted_contacts:
+            reasons.append("trusted contacts masked before phishing-model scoring")
         if money_mentions:
             reasons.append("money-related language detected")
         if signal_families >= 3:
@@ -139,13 +182,21 @@ class TextRiskAnalyzer:
             "model_best_chunk": best_chunk,
             "input_text": normalized,
             "filtered_text": filtered_text,
+            "model_input_text": model_input_text,
             "relevant_chunks": relevant_chunks,
             "dropped_chunks": dropped_chunks,
             "warnings": warnings,
             "keyword_groups": matched_groups,
             "urls": urls,
+            "trusted_urls": trusted_urls,
             "emails": emails,
             "phone_numbers": phone_numbers,
+            "trusted_emails": trusted_emails,
+            "trusted_phone_numbers": trusted_phone_numbers,
+            "masked_trusted_contacts": masked_trusted_contacts,
+            "detected_urls": detected_urls,
+            "detected_emails": detected_emails,
+            "detected_phone_numbers": detected_phone_numbers,
             "money_mentions": money_mentions,
             "reasons": reasons,
         }
@@ -204,7 +255,7 @@ class TextRiskAnalyzer:
         chunks = []
         chunks.extend([
             seg.strip()
-            for seg in re.split(r"[.!?;\n]+", text)
+            for seg in self.SENTENCE_SPLIT_PATTERN.split(text)
             if seg.strip()
         ])
 
@@ -241,11 +292,14 @@ class TextRiskAnalyzer:
             if term in lowered or term in denoised:
                 score -= 1.5
 
-        if self.URL_PATTERN.search(chunk):
+        _, untrusted_urls = self._partition_trusted_urls(self._extract_urls(chunk))
+        _, untrusted_emails = self._partition_trusted_emails(self.EMAIL_PATTERN.findall(chunk))
+        _, untrusted_phone_numbers = self._partition_trusted_phone_numbers(self._extract_phone_numbers(chunk))
+        if untrusted_urls:
             score += 2.5
-        if self.EMAIL_PATTERN.search(chunk):
+        if untrusted_emails:
             score += 2.0
-        if self.PHONE_PATTERN.search(chunk):
+        if untrusted_phone_numbers:
             score += 2.0
         if self.MONEY_PATTERN.search(chunk):
             score += 1.5
@@ -263,6 +317,150 @@ class TextRiskAnalyzer:
 
         return score
 
+    def _extract_urls(self, text: str):
+        found = []
+        seen = set()
+
+        source = text or ""
+        for match in self.URL_PATTERN.finditer(source):
+            candidate = str(match.group(0)).strip().strip(".,;:!?()[]{}<>\"'")
+            if not candidate or "@" in candidate:
+                continue
+            if match.start() > 0 and source[match.start() - 1] == "@":
+                continue
+
+            domain = self._normalize_url_domain(candidate)
+            if not domain:
+                continue
+
+            key = candidate.lower()
+            if key in seen:
+                continue
+
+            seen.add(key)
+            found.append(candidate)
+
+        return found
+
+    def _extract_phone_numbers(self, text: str):
+        found = []
+        seen = set()
+
+        for match in self.PHONE_CANDIDATE_PATTERN.findall(text or ""):
+            candidate = str(match).strip().strip(".,;:!?()[]{}<>\"'")
+            if not candidate:
+                continue
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate) or re.fullmatch(r"\d{1,2}-\d{1,2}-\d{2,4}", candidate):
+                continue
+
+            normalized = self._normalize_phone_number(candidate)
+            if not normalized:
+                continue
+
+            # Keep typical phone numbers, plus short trusted hotlines like 1799.
+            if len(normalized) < 8 and normalized not in self.trusted_phone_numbers:
+                continue
+
+            if normalized in seen:
+                continue
+
+            seen.add(normalized)
+            found.append(candidate)
+
+        return found
+
+    def _partition_trusted_urls(self, urls):
+        trusted = []
+        untrusted = []
+        for url in urls:
+            domain = self._normalize_url_domain(url)
+            is_trusted = any(
+                domain == trusted_domain or domain.endswith(f".{trusted_domain}")
+                for trusted_domain in self.trusted_url_domains
+            )
+            if is_trusted:
+                trusted.append(url)
+            else:
+                untrusted.append(url)
+        return trusted, untrusted
+
+    def _partition_trusted_emails(self, emails):
+        trusted = []
+        untrusted = []
+        for email in emails:
+            normalized = self._normalize_email(email)
+            domain = normalized.split("@", 1)[1] if "@" in normalized else ""
+            is_trusted = (
+                normalized in self.trusted_email_addresses
+                or any(
+                    domain == trusted_domain or domain.endswith(f".{trusted_domain}")
+                    for trusted_domain in self.trusted_email_domains
+                )
+            )
+            if is_trusted:
+                trusted.append(email)
+            else:
+                untrusted.append(email)
+        return trusted, untrusted
+
+    def _partition_trusted_phone_numbers(self, phone_numbers):
+        trusted = []
+        untrusted = []
+        for phone_number in phone_numbers:
+            normalized = self._normalize_phone_number(phone_number)
+            if normalized and normalized in self.trusted_phone_numbers:
+                trusted.append(phone_number)
+            else:
+                untrusted.append(phone_number)
+        return trusted, untrusted
+
+    def _normalize_email(self, email: str) -> str:
+        return str(email or "").strip().lower()
+
+    def _normalize_domain(self, domain: str) -> str:
+        normalized = str(domain or "").strip().lower()
+        return normalized.lstrip("@")
+
+    def _normalize_phone_number(self, phone_number: str) -> str:
+        return re.sub(r"\D+", "", str(phone_number or ""))
+
+    def _normalize_url_domain(self, url: str) -> str:
+        candidate = str(url or "").strip().lower().strip(".,;:!?()[]{}<>\"'")
+        if not candidate:
+            return ""
+
+        with_scheme = candidate if "://" in candidate else f"https://{candidate}"
+
+        try:
+            parsed = urlsplit(with_scheme)
+        except Exception:
+            return ""
+
+        domain = parsed.netloc or parsed.path.split("/", 1)[0]
+        domain = domain.split("@")[-1].split(":", 1)[0].strip(".")
+        return domain
+
+    def _mask_trusted_contacts_for_model(self, text: str, trusted_urls, trusted_emails, trusted_phone_numbers):
+        masked = str(text or "")
+        replaced = []
+
+        for url in sorted(set(trusted_urls), key=len, reverse=True):
+            if url and url in masked:
+                masked = masked.replace(url, "[TRUSTED_URL]")
+                replaced.append(url)
+
+        for email in sorted(set(trusted_emails), key=len, reverse=True):
+            if email and email in masked:
+                masked = masked.replace(email, "[TRUSTED_EMAIL]")
+                replaced.append(email)
+
+        for phone_number in sorted(set(trusted_phone_numbers), key=len, reverse=True):
+            if phone_number and phone_number in masked:
+                masked = masked.replace(phone_number, "[TRUSTED_PHONE]")
+                replaced.append(phone_number)
+
+        return masked, replaced
+
     def _split_text_for_model(self, text: str):
         normalized = (text or "").strip()
         if not normalized:
@@ -273,7 +471,7 @@ class TextRiskAnalyzer:
         # Split into sentence-like segments first.
         segments = [
             seg.strip()
-            for seg in re.split(r"[.!?;\n]+", normalized)
+            for seg in self.SENTENCE_SPLIT_PATTERN.split(normalized)
             if seg.strip()
         ]
         chunks.extend(segments)
