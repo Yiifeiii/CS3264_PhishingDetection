@@ -5,6 +5,7 @@ from utils.text_model_service import TextModelService
 
 
 class TextRiskAnalyzer:
+    CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
     URL_PATTERN = re.compile(r"(https?://[^\s]+|www\.[^\s]+|\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/[^\s]*)?\b)")
     EMAIL_PATTERN = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
     PHONE_CANDIDATE_PATTERN = re.compile(r"(?:\+\d[\d\s-]{3,20}\d|\b\d[\d\s-]{3,20}\d\b|\b\d{3,4}\b)")
@@ -18,6 +19,11 @@ class TextRiskAnalyzer:
             cfg.DEVICE,
             cfg.TEXT_MODEL_POSITIVE_CLASS_INDEX,
         )
+        self.chinese_model = TextModelService(
+            getattr(cfg, "CHINESE_TEXT_PHISHING_MODEL_NAME", ""),
+            cfg.DEVICE,
+            getattr(cfg, "CHINESE_TEXT_MODEL_POSITIVE_CLASS_INDEX", None),
+        ) if getattr(cfg, "CHINESE_TEXT_PHISHING_MODEL_NAME", "") else None
         self.trusted_email_addresses = {
             self._normalize_email(email)
             for email in getattr(cfg, "TRUSTED_EMAIL_ADDRESSES", ())
@@ -105,14 +111,14 @@ class TextRiskAnalyzer:
         model_chunks = self._split_text_for_model(model_input_text)
         chunk_scores = []
         for chunk in model_chunks:
-            prob = self.model.predict_phishing_probability(chunk)
+            prob, route, scored_text = self._predict_chunk_probability(chunk)
             if prob is not None:
-                chunk_scores.append((chunk, prob))
+                chunk_scores.append((chunk, prob, route, scored_text))
 
         if chunk_scores:
-            best_chunk, model_score_raw = max(chunk_scores, key=lambda x: x[1])
+            best_chunk, model_score_raw, model_route, model_scored_text = max(chunk_scores, key=lambda x: x[1])
         else:
-            best_chunk, model_score_raw = (None, None)
+            best_chunk, model_score_raw, model_route, model_scored_text = (None, None, None, None)
 
         model_score = self._calibrate_model_score(model_score_raw)
 
@@ -149,12 +155,12 @@ class TextRiskAnalyzer:
             reasons.append("multiple independent phishing signal types detected")
         if model_score_raw is not None:
             reasons.append(
-                f"Cybersectony model probability: {model_score_raw:.2f} "
+                f"{self._describe_model_route(model_route)} probability: {model_score_raw:.2f} "
                 f"(calibrated: {model_score:.2f})"
             )
             if best_chunk:
                 reasons.append(f"model strongest text span: '{best_chunk[:90]}'")
-        elif self.model.is_loaded:
+        elif self.model.is_loaded or (self.chinese_model and self.chinese_model.is_loaded):
             reasons.append("text model loaded but no usable text for inference")
         else:
             reasons.append("text model unavailable; heuristic-only text scoring")
@@ -177,7 +183,11 @@ class TextRiskAnalyzer:
             "rule_score": round(rule_score, 4),
             "model_score": None if model_score is None else round(model_score, 4),
             "model_score_raw": None if model_score_raw is None else round(model_score_raw, 4),
-            "model_loaded": self.model.is_loaded,
+            "model_loaded": self.model.is_loaded or bool(self.chinese_model and self.chinese_model.is_loaded),
+            "english_model_loaded": self.model.is_loaded,
+            "chinese_model_loaded": bool(self.chinese_model and self.chinese_model.is_loaded),
+            "model_route": model_route,
+            "model_scored_text": model_scored_text,
             "model_chunks_evaluated": len(chunk_scores),
             "model_best_chunk": best_chunk,
             "input_text": normalized,
@@ -246,6 +256,10 @@ class TextRiskAnalyzer:
             best_chunk, best_score = max(scored, key=lambda item: item[1])
             if best_score > 0:
                 kept = [best_chunk]
+            elif self.CHINESE_PATTERN.search(normalized):
+                # Keep the best Chinese-bearing chunk so the Chinese classifier
+                # still gets a chance even when English-centric heuristics score low.
+                kept = [best_chunk]
 
         kept_keys = {chunk.lower() for chunk in kept}
         dropped = [chunk for chunk, _ in scored if chunk.lower() not in kept_keys]
@@ -288,6 +302,9 @@ class TextRiskAnalyzer:
         for term in self.cfg.TEXT_RELEVANCE_WEAK_SIGNALS:
             if term in lowered or term in denoised:
                 score += 0.75
+        for term in getattr(self.cfg, "TEXT_RELEVANCE_STRONG_SIGNALS_ZH", ()):
+            if term in chunk:
+                score += 2.0
         for term in self.cfg.TEXT_RELEVANCE_NOISE_HINTS:
             if term in lowered or term in denoised:
                 score -= 1.5
@@ -384,6 +401,28 @@ class TextRiskAnalyzer:
                 untrusted.append(url)
         return trusted, untrusted
 
+    def _predict_chunk_probability(self, chunk: str):
+        normalized = (chunk or "").strip()
+        if not normalized:
+            return None, None, None
+
+        contains_chinese = bool(self.CHINESE_PATTERN.search(normalized))
+        if contains_chinese and self.chinese_model and self.chinese_model.is_loaded:
+            prob = self.chinese_model.predict_phishing_probability(normalized)
+            return prob, "chinese", normalized
+
+        english_text = normalized
+        route = "english"
+        if contains_chinese:
+            english_text = self._strip_chinese_for_english_model(normalized)
+            route = "english_stripped_fallback"
+
+        if not english_text:
+            return None, None, None
+
+        prob = self.model.predict_phishing_probability(english_text)
+        return prob, route, english_text
+
     def _partition_trusted_emails(self, emails):
         trusted = []
         untrusted = []
@@ -424,6 +463,10 @@ class TextRiskAnalyzer:
     def _normalize_phone_number(self, phone_number: str) -> str:
         return re.sub(r"\D+", "", str(phone_number or ""))
 
+    def _strip_chinese_for_english_model(self, text: str) -> str:
+        stripped = self.CHINESE_PATTERN.sub(" ", str(text or ""))
+        return re.sub(r"\s+", " ", stripped).strip()
+
     def _normalize_url_domain(self, url: str) -> str:
         candidate = str(url or "").strip().lower().strip(".,;:!?()[]{}<>\"'")
         if not candidate:
@@ -460,6 +503,14 @@ class TextRiskAnalyzer:
                 replaced.append(phone_number)
 
         return masked, replaced
+
+    def _describe_model_route(self, route: str | None) -> str:
+        labels = {
+            "english": "English DistilBERT model",
+            "english_stripped_fallback": "English DistilBERT fallback",
+            "chinese": "Chinese text model",
+        }
+        return labels.get(route or "", "Text model")
 
     def _split_text_for_model(self, text: str):
         normalized = (text or "").strip()

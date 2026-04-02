@@ -7,13 +7,18 @@ class Config:
     DEEPFAKE_MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
     TEXT_PHISHING_MODEL_NAME = "cybersectony/phishing-email-detection-distilbert_v2.4.1"
     TEXT_MODEL_POSITIVE_CLASS_INDEX = 1
+    # Experimental Chinese spam-email proxy model. This is the closest Chinese
+    # sequence-classification checkpoint we found that exposes an explicit spam
+    # class, but it is not a dedicated Chinese phishing model.
+    CHINESE_TEXT_PHISHING_MODEL_NAME = "jason23322/email-classifier-optimized"
+    CHINESE_TEXT_MODEL_POSITIVE_CLASS_INDEX = 3
     CHINESE_TO_ENGLISH_MODEL_NAME = "Helsinki-NLP/opus-mt-zh-en"
 
     # paths
     RAW_IMAGE_DIR = "data/raw"
     SUPPORTED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
     OCR_LANGUAGES = ("en", "ch_sim")
-    OCR_CHINESE_POLICY = "strip"  # valid options: "strip", "skip", "translate"
+    OCR_CHINESE_POLICY = "strip"  # valid options: "strip", "skip", "translate", "route"
 
     # Allowlisted contacts suppress email/phone phishing heuristics but do not
     # hard-mark the sample as safe. Keep these lists tight and review them.
@@ -125,6 +130,10 @@ class Config:
     TEXT_RELEVANCE_WEAK_SIGNALS = (
         "call", "message", "now", "today", "immediately", "security", "alert",
         "notice", "government", "profile", "transaction", "money", "cash",
+    )
+    TEXT_RELEVANCE_STRONG_SIGNALS_ZH = (
+        "验证", "验证码", "账户", "账号", "密码", "登录", "点击", "链接", "中奖",
+        "奖励", "退款", "银行", "付款", "转账", "官方", "通知", "立即", "紧急", "客服",
     )
     TEXT_RELEVANCE_NOISE_HINTS = (
         "channelnewsasia", "mothership", "straits times", "cna", "readmore",
