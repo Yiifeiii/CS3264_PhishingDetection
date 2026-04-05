@@ -4,6 +4,8 @@ from PIL import Image
 
 from torch.utils.data import Dataset
 
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"}
+
 
 def collect_samples(root_dir: Path, class_to_id: dict) -> List[Tuple[str, int]]:
     samples = []
@@ -12,7 +14,7 @@ def collect_samples(root_dir: Path, class_to_id: dict) -> List[Tuple[str, int]]:
         if not class_dir.exists():
             continue
         for path in class_dir.rglob("*"):
-            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            if path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 samples.append((str(path), class_id))
     return sorted(samples)
 

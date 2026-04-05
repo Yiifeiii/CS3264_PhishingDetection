@@ -24,7 +24,7 @@ CLASS_NAMES = ["real", "fake"]
 CLASS_TO_ID = {name: idx for idx, name in enumerate(CLASS_NAMES)}
 
 # ===== SigLIP2 =====
-MODEL_NAME = "google/siglip2-base-patch16-224"
+MODEL_NAME = os.getenv("SIGLIP_MODEL_NAME", "google/siglip2-base-patch16-224")
 
 
 def detect_device():
@@ -37,7 +37,7 @@ def detect_device():
 
 DEVICE = os.getenv("SIGLIP_DEVICE", detect_device())
 BATCH_SIZE = 16
-NUM_WORKERS = 4
+NUM_WORKERS = int(os.getenv("SIGLIP_NUM_WORKERS", "4"))
 
 # ===== Output =====
 TRAIN_EMBED_FILE = EMBED_DIR / "train_embeddings.npz"

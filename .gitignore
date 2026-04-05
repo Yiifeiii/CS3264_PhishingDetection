@@ -30,3 +30,5 @@ models/**/*.safetensors
 data/
 external/
 outputs/
+
+artifacts/
