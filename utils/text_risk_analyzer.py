@@ -157,6 +157,12 @@ class TextRiskAnalyzer:
                 trusted_emails,
                 trusted_phone_numbers,
             )
+        masked_phone_numbers_for_model = []
+        if getattr(self.cfg, "MASK_ALL_PHONE_NUMBERS_FOR_MODEL", False):
+            model_input_text, masked_phone_numbers_for_model = self._mask_phone_numbers_for_model(
+                model_input_text,
+                detected_phone_numbers,
+            )
 
         model_chunks = self._split_text_for_model(model_input_text)
         chunk_scores = []
@@ -208,6 +214,8 @@ class TextRiskAnalyzer:
             reasons.append("benign notification context detected")
         if masked_trusted_contacts:
             reasons.append("trusted contacts masked before phishing-model scoring")
+        if masked_phone_numbers_for_model:
+            reasons.append("all detected phone numbers masked before phishing-model scoring")
         if money_mentions:
             reasons.append("money-related language detected")
         if signal_families >= 3:
@@ -265,6 +273,7 @@ class TextRiskAnalyzer:
             "trusted_emails": trusted_emails,
             "trusted_phone_numbers": trusted_phone_numbers,
             "masked_trusted_contacts": masked_trusted_contacts,
+            "masked_phone_numbers_for_model": masked_phone_numbers_for_model,
             "detected_urls": detected_urls,
             "detected_emails": detected_emails,
             "benign_context_hits": benign_hits,
@@ -677,6 +686,17 @@ class TextRiskAnalyzer:
         for phone_number in sorted(set(trusted_phone_numbers), key=len, reverse=True):
             if phone_number and phone_number in masked:
                 masked = masked.replace(phone_number, "[TRUSTED_PHONE]")
+                replaced.append(phone_number)
+
+        return masked, replaced
+
+    def _mask_phone_numbers_for_model(self, text: str, phone_numbers):
+        masked = str(text or "")
+        replaced = []
+
+        for phone_number in sorted(set(phone_numbers or ()), key=len, reverse=True):
+            if phone_number and phone_number in masked:
+                masked = masked.replace(phone_number, "[PHONE_NUMBER]")
                 replaced.append(phone_number)
 
         return masked, replaced

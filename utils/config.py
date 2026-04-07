@@ -51,6 +51,7 @@ class Config:
         "gov.sg",
     )
     MASK_TRUSTED_CONTACTS_FOR_MODEL = True
+    MASK_ALL_PHONE_NUMBERS_FOR_MODEL = True
 
     REAL_IMAGE = "data/raw/image1.jpg"
     FAKE_IMAGE = "data/raw/image3.jpg"
@@ -249,5 +250,5 @@ class Config:
 
     IMAGE_SCORE_WEIGHT = 0.35
     TEXT_SCORE_WEIGHT = 0.65
-    MEDIUM_RISK_THRESHOLD = 0.4
+    MEDIUM_RISK_THRESHOLD = 0.75
     HIGH_RISK_THRESHOLD = 0.7
