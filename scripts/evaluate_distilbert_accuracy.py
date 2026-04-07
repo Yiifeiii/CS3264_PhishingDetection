@@ -34,7 +34,13 @@ def parse_args() -> argparse.Namespace:
         "--threshold",
         type=float,
         default=None,
-        help="Decision threshold for the calibrated text score. Defaults to MEDIUM_RISK_THRESHOLD.",
+        help="Decision threshold for the combined text score. Defaults to MEDIUM_RISK_THRESHOLD.",
+    )
+    parser.add_argument(
+        "--decision-source",
+        choices=["combined", "model"],
+        default="combined",
+        help="Whether predictions should use the full text score or the model-only score.",
     )
     parser.add_argument(
         "--limit",
@@ -153,7 +159,8 @@ def main() -> int:
         result = analyzer.analyze(text)
         if result.get("model_route") in route_counts:
             route_counts[str(result.get("model_route"))] += 1
-        score = float(result.get("model_score") or 0.0)
+        score_key = "score" if args.decision_source == "combined" else "model_score"
+        score = float(result.get(score_key) or 0.0)
         pred = 1 if score >= threshold else 0
         used_images.append(str(image_path))
 
@@ -166,7 +173,9 @@ def main() -> int:
                     "path": str(image_path),
                     "true_label": label,
                     "pred_label": pred,
-                    "model_score": score,
+                    "decision_score": score,
+                    "combined_score": result.get("score"),
+                    "model_score": result.get("model_score"),
                     "model_score_raw": result.get("model_score_raw"),
                     "text_preview": (text[:160] + "...") if len(text) > 160 else text,
                     "filtered_preview": ((result.get("filtered_text") or "")[:160] + "...") if len(result.get("filtered_text") or "") > 160 else (result.get("filtered_text") or ""),
@@ -190,6 +199,7 @@ def main() -> int:
     print(f"Routed Chinese texts: {routed_count}")
     print(f"OCR active languages: {ocr.active_languages}")
     print(f"OCR load warning: {ocr.load_error}")
+    print(f"Decision source: {args.decision_source}")
     print(f"Threshold: {threshold:.2f}")
     print(f"English model loaded: {analyzer.model.is_loaded}")
     print(f"Chinese model loaded: {bool(analyzer.chinese_model and analyzer.chinese_model.is_loaded)}")
@@ -216,8 +226,9 @@ def main() -> int:
         for item in mistakes[:10]:
             print(
                 f"- {item['path']} | true={item['true_label']} pred={item['pred_label']} "
-                f"| score={item['model_score']:.4f} raw={item['model_score_raw']} "
-                f"| route={item['model_route']} | text={item['text_preview']}"
+                f"| decision_score={item['decision_score']:.4f} combined={item['combined_score']} "
+                f"| model={item['model_score']} raw={item['model_score_raw']} "
+                f"| route={item['model_route']} | text={safe_console_text(item['text_preview'])}"
             )
             if item['filtered_preview']:
                 print(f"  filtered={safe_console_text(item['filtered_preview'])}")

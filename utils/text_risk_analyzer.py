@@ -44,6 +44,16 @@ class TextRiskAnalyzer:
             for domain in getattr(cfg, "TRUSTED_URL_DOMAINS", ())
             if self._normalize_domain(domain)
         }
+        self.all_keyword_terms = tuple(dict.fromkeys(
+            term
+            for terms in getattr(cfg, "PHISHING_KEYWORDS", {}).values()
+            for term in terms
+        ))
+        self.url_tld_allowlist = tuple(sorted(
+            getattr(cfg, "URL_TLD_ALLOWLIST", ()),
+            key=len,
+            reverse=True,
+        ))
 
     def analyze(self, text: str):
         normalized = (text or "").strip()
@@ -56,7 +66,10 @@ class TextRiskAnalyzer:
         total_hits = 0
 
         for group_name, keywords in self.cfg.PHISHING_KEYWORDS.items():
-            hits = [keyword for keyword in keywords if keyword in lowered or keyword in denoised]
+            hits = [
+                keyword for keyword in keywords
+                if self._contains_term(lowered, keyword) or self._contains_term(denoised, keyword)
+            ]
             if hits:
                 matched_groups[group_name] = hits
                 total_hits += len(hits)
@@ -68,6 +81,41 @@ class TextRiskAnalyzer:
         trusted_emails, emails = self._partition_trusted_emails(detected_emails)
         trusted_phone_numbers, phone_numbers = self._partition_trusted_phone_numbers(detected_phone_numbers)
         money_mentions = self.MONEY_PATTERN.findall(filtered_text)
+        benign_hits = self._collect_term_hits(
+            lowered,
+            getattr(self.cfg, "BENIGN_CONTEXT_SIGNALS", ()),
+            alternate_text=denoised,
+        )
+        benign_blockers = self._collect_term_hits(
+            lowered,
+            getattr(self.cfg, "BENIGN_PENALTY_BLOCKERS", ()),
+            alternate_text=denoised,
+        )
+        trusted_signal_count = sum([
+            bool(trusted_urls),
+            bool(trusted_emails),
+            bool(trusted_phone_numbers),
+        ])
+        benign_penalty = 0.0
+        if benign_hits and not benign_blockers:
+            benign_penalty += len(benign_hits) * self.cfg.BENIGN_CONTEXT_HIT_WEIGHT
+        if not benign_blockers:
+            trusted_bonus_count = sum([
+                bool(trusted_urls),
+                bool(trusted_emails),
+                bool(trusted_phone_numbers) and bool(benign_hits),
+            ])
+            if trusted_bonus_count:
+                benign_penalty += trusted_bonus_count * self.cfg.TRUSTED_SIGNAL_BENIGN_BONUS
+        benign_penalty = min(benign_penalty, self.cfg.BENIGN_CONTEXT_MAX_PENALTY)
+        phone_signal_active = self._should_treat_phone_as_risky(
+            filtered_text,
+            phone_numbers,
+            matched_groups,
+            urls,
+            emails,
+            money_mentions,
+        )
 
         rule_score = 0.0
         rule_score += min(total_hits * self.cfg.KEYWORD_HIT_WEIGHT, 0.6)
@@ -76,7 +124,7 @@ class TextRiskAnalyzer:
             rule_score += self.cfg.URL_PRESENT_WEIGHT
         if emails:
             rule_score += self.cfg.EMAIL_PRESENT_WEIGHT
-        if phone_numbers:
+        if phone_signal_active:
             rule_score += self.cfg.PHONE_PRESENT_WEIGHT
         if money_mentions:
             rule_score += self.cfg.MONEY_PRESENT_WEIGHT
@@ -85,13 +133,15 @@ class TextRiskAnalyzer:
             bool(matched_groups),
             bool(urls),
             bool(emails),
-            bool(phone_numbers),
+            bool(phone_signal_active),
             bool(money_mentions),
         ])
         if signal_families >= 3:
             rule_score += self.cfg.MULTI_SIGNAL_BONUS
         if ("credential_request" in matched_groups) and (urls or emails):
             rule_score += self.cfg.LINK_CREDENTIAL_BONUS
+        if benign_penalty:
+            rule_score = max(rule_score - benign_penalty, 0.0)
 
         if not filtered_text:
             rule_score *= self.cfg.EMPTY_TEXT_PENALTY
@@ -121,6 +171,11 @@ class TextRiskAnalyzer:
             best_chunk, model_score_raw, model_route, model_scored_text = (None, None, None, None)
 
         model_score = self._calibrate_model_score(model_score_raw)
+        if model_score is not None and benign_penalty:
+            model_score = max(
+                model_score - benign_penalty * self.cfg.BENIGN_MODEL_PENALTY_MULTIPLIER,
+                0.0,
+            )
 
         if model_score is None:
             score = rule_score
@@ -139,14 +194,18 @@ class TextRiskAnalyzer:
             reasons.append("URL detected in image text")
         if emails:
             reasons.append("email address detected in image text")
-        if phone_numbers:
+        if phone_signal_active:
             reasons.append("phone number detected in image text")
+        elif phone_numbers:
+            reasons.append("phone number detected but context looks benign")
         if trusted_urls:
             reasons.append("trusted government site ignored for heuristic scoring")
         if trusted_emails:
             reasons.append("trusted email/domain ignored for heuristic scoring")
         if trusted_phone_numbers:
             reasons.append("trusted phone number ignored for heuristic scoring")
+        if benign_hits:
+            reasons.append("benign notification context detected")
         if masked_trusted_contacts:
             reasons.append("trusted contacts masked before phishing-model scoring")
         if money_mentions:
@@ -200,13 +259,16 @@ class TextRiskAnalyzer:
             "urls": urls,
             "trusted_urls": trusted_urls,
             "emails": emails,
-            "phone_numbers": phone_numbers,
+            "phone_numbers": phone_numbers if phone_signal_active else [],
+            "detected_phone_numbers": detected_phone_numbers,
+            "context_benign_phone_numbers": [] if phone_signal_active else phone_numbers,
             "trusted_emails": trusted_emails,
             "trusted_phone_numbers": trusted_phone_numbers,
             "masked_trusted_contacts": masked_trusted_contacts,
             "detected_urls": detected_urls,
             "detected_emails": detected_emails,
-            "detected_phone_numbers": detected_phone_numbers,
+            "benign_context_hits": benign_hits,
+            "benign_penalty_blockers": benign_blockers,
             "money_mentions": money_mentions,
             "reasons": reasons,
         }
@@ -297,16 +359,22 @@ class TextRiskAnalyzer:
         score = 0.0
 
         for term in self.cfg.TEXT_RELEVANCE_STRONG_SIGNALS:
-            if term in lowered or term in denoised:
+            if self._contains_term(lowered, term) or self._contains_term(denoised, term):
                 score += 2.0
         for term in self.cfg.TEXT_RELEVANCE_WEAK_SIGNALS:
-            if term in lowered or term in denoised:
+            if self._contains_term(lowered, term) or self._contains_term(denoised, term):
                 score += 0.75
         for term in getattr(self.cfg, "TEXT_RELEVANCE_STRONG_SIGNALS_ZH", ()):
             if term in chunk:
                 score += 2.0
+        keyword_hits = self._collect_term_hits(
+            lowered,
+            self.all_keyword_terms,
+            alternate_text=denoised,
+        )
+        score += min(len(keyword_hits) * 1.25, 4.0)
         for term in self.cfg.TEXT_RELEVANCE_NOISE_HINTS:
-            if term in lowered or term in denoised:
+            if self._contains_term(lowered, term) or self._contains_term(denoised, term):
                 score -= 1.5
 
         _, untrusted_urls = self._partition_trusted_urls(self._extract_urls(chunk))
@@ -316,8 +384,8 @@ class TextRiskAnalyzer:
             score += 2.5
         if untrusted_emails:
             score += 2.0
-        if untrusted_phone_numbers:
-            score += 2.0
+        if self._should_treat_phone_as_risky(chunk, untrusted_phone_numbers):
+            score += 0.75
         if self.MONEY_PATTERN.search(chunk):
             score += 1.5
 
@@ -334,6 +402,78 @@ class TextRiskAnalyzer:
 
         return score
 
+    def _contains_term(self, text: str, term: str) -> bool:
+        haystack = str(text or "").lower()
+        needle = str(term or "").strip().lower()
+        if not haystack or not needle:
+            return False
+        if self.CHINESE_PATTERN.search(needle):
+            return needle in haystack
+        pattern = rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])"
+        if re.search(pattern, haystack) is not None:
+            return True
+        if any(ch.isspace() for ch in needle) or any(ch in needle for ch in "-._/"):
+            collapsed_haystack = re.sub(r"[^a-z0-9]+", "", haystack)
+            collapsed_needle = re.sub(r"[^a-z0-9]+", "", needle)
+            if collapsed_needle and collapsed_needle in collapsed_haystack:
+                return True
+        return False
+
+    def _collect_term_hits(self, text: str, terms, alternate_text: str | None = None) -> list[str]:
+        hits = []
+        for term in terms:
+            if self._contains_term(text, term) or (alternate_text and self._contains_term(alternate_text, term)):
+                hits.append(term)
+        return hits
+
+    def _should_treat_phone_as_risky(
+        self,
+        text: str,
+        phone_numbers,
+        matched_groups=None,
+        urls=None,
+        emails=None,
+        money_mentions=None,
+    ) -> bool:
+        if not phone_numbers:
+            return False
+
+        lowered = str(text or "").lower()
+        denoised = self._denoise_for_keywords(lowered)
+        benign_hits = self._collect_term_hits(
+            lowered,
+            getattr(self.cfg, "PHONE_BENIGN_CONTEXT_SIGNALS", ()),
+            alternate_text=denoised,
+        )
+        risky_hits = self._collect_term_hits(
+            lowered,
+            getattr(self.cfg, "PHONE_RISK_CONTEXT_SIGNALS", ()),
+            alternate_text=denoised,
+        )
+
+        if benign_hits and not risky_hits:
+            return False
+
+        matched_groups = matched_groups or {}
+        urls = urls or []
+        emails = emails or []
+        money_mentions = money_mentions or []
+        suspicious_group_names = {
+            "urgency",
+            "credential_request",
+            "financial_request",
+            "call_to_action",
+            "prize_bait",
+        }
+        group_support = any(group in matched_groups for group in suspicious_group_names)
+        transport_support = bool(urls or emails)
+        monetary_support = bool(money_mentions) and not benign_hits
+
+        if benign_hits and not (transport_support or group_support):
+            return False
+
+        return bool(risky_hits or transport_support or group_support or monetary_support)
+
     def _extract_urls(self, text: str):
         found = []
         seen = set()
@@ -348,6 +488,9 @@ class TextRiskAnalyzer:
 
             domain = self._normalize_url_domain(candidate)
             if not domain:
+                continue
+            tld = domain.rsplit(".", 1)[-1]
+            if tld not in getattr(self.cfg, "URL_TLD_ALLOWLIST", ()):
                 continue
 
             key = candidate.lower()
@@ -407,7 +550,8 @@ class TextRiskAnalyzer:
             return None, None, None
 
         contains_chinese = bool(self.CHINESE_PATTERN.search(normalized))
-        if contains_chinese and self.chinese_model and self.chinese_model.is_loaded:
+        should_route_chinese = self._should_route_to_chinese_model(normalized)
+        if should_route_chinese and self.chinese_model and self.chinese_model.is_loaded:
             prob = self.chinese_model.predict_phishing_probability(normalized)
             return prob, "chinese", normalized
 
@@ -481,7 +625,40 @@ class TextRiskAnalyzer:
 
         domain = parsed.netloc or parsed.path.split("/", 1)[0]
         domain = domain.split("@")[-1].split(":", 1)[0].strip(".")
-        return domain
+        return self._repair_ocr_merged_tld(domain)
+
+    def _repair_ocr_merged_tld(self, domain: str) -> str:
+        labels = [label for label in str(domain or "").split(".") if label]
+        if not labels:
+            return ""
+
+        last_label = labels[-1]
+        if last_label in self.url_tld_allowlist:
+            return ".".join(labels)
+
+        for tld in self.url_tld_allowlist:
+            if last_label.startswith(tld) and len(last_label) > len(tld):
+                labels[-1] = tld
+                return ".".join(labels)
+
+        return ".".join(labels)
+
+    def _should_route_to_chinese_model(self, text: str) -> bool:
+        normalized = str(text or "")
+        chinese_chars = len(self.CHINESE_PATTERN.findall(normalized))
+        if chinese_chars == 0:
+            return False
+
+        alpha_or_chinese = [
+            ch for ch in normalized
+            if ch.isalpha() or self.CHINESE_PATTERN.match(ch)
+        ]
+        total_letters = len(alpha_or_chinese)
+        chinese_ratio = chinese_chars / total_letters if total_letters else 1.0
+
+        min_chars = getattr(self.cfg, "CHINESE_ROUTE_MIN_CHAR_COUNT", 1)
+        min_ratio = getattr(self.cfg, "CHINESE_ROUTE_MIN_CHAR_RATIO", 0.0)
+        return chinese_chars >= min_chars and chinese_ratio >= min_ratio
 
     def _mask_trusted_contacts_for_model(self, text: str, trusted_urls, trusted_emails, trusted_phone_numbers):
         masked = str(text or "")
