@@ -19,12 +19,12 @@
       },
       "package": "sg.scamcheck.app"
     },
+    "newArchEnabled": false,
     "plugins": [
       [
         "expo-image-picker",
         {
-          "photosPermission": "ScamCheck SG needs access to your photos to analyse screenshots for scams.",
-          "cameraPermission": "ScamCheck SG needs camera access to capture suspicious messages."
+          "photosPermission": "ScamCheck SG needs access to your photos to analyse screenshots for scams."
         }
       ]
     ]

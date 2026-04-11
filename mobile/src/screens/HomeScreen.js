@@ -19,25 +19,14 @@ export default function HomeScreen({ navigation }) {
     setTip(TIPS[Math.floor(Math.random() * TIPS.length)]);
   }, []);
 
-  const pickImage = async (source) => {
-    let result;
-
-    if (source === "camera") {
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (!perm.granted) return;
-      result = await ImagePicker.launchCameraAsync({
-        quality: 0.8,
-        allowsEditing: true,
-      });
-    } else {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) return;
-      result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
-        quality: 0.8,
-        allowsEditing: true,
-      });
-    }
+  const pickImage = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) return;
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      quality: 0.8,
+      allowsEditing: true,
+    });
 
     if (!result.canceled && result.assets?.[0]) {
       navigation.navigate("Preview", { imageUri: result.assets[0].uri });
@@ -60,26 +49,16 @@ export default function HomeScreen({ navigation }) {
       <View style={styles.uploadZone}>
         <Ionicons name="cloud-upload-outline" size={48} color={COLORS.grey} />
         <Text style={styles.uploadText}>
-          Upload or capture a screenshot to check for scams
+          Upload a screenshot to check for scams
         </Text>
 
-        <View style={styles.buttonRow}>
-          <TouchableOpacity
-            style={[styles.btn, styles.btnPrimary]}
-            onPress={() => pickImage("camera")}
-          >
-            <Ionicons name="camera" size={20} color={COLORS.white} />
-            <Text style={styles.btnTextLight}>Camera</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.btn, styles.btnOutline]}
-            onPress={() => pickImage("gallery")}
-          >
-            <Ionicons name="images" size={20} color={COLORS.navy} />
-            <Text style={styles.btnTextDark}>Gallery</Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          style={[styles.btn, styles.btnPrimary]}
+          onPress={pickImage}
+        >
+          <Ionicons name="images" size={20} color={COLORS.white} />
+          <Text style={styles.btnTextLight}>Upload Image</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Scam tip */}
@@ -117,11 +96,6 @@ const styles = StyleSheet.create({
     marginVertical: SPACING.md,
   },
 
-  buttonRow: {
-    flexDirection: "row",
-    gap: SPACING.md,
-    marginTop: SPACING.sm,
-  },
   btn: {
     flexDirection: "row",
     alignItems: "center",
