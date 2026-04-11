@@ -28,3 +28,7 @@ models/**/*.safetensors
 .cache/
 *.log
 data/
+external/
+outputs/
+
+artifacts/
