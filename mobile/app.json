@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "ScamCheck SG",
+    "slug": "scamcheck-sg",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#1A2E4A"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "sg.scamcheck.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#1A2E4A"
+      },
+      "package": "sg.scamcheck.app"
+    },
+    "newArchEnabled": false,
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "ScamCheck SG needs access to your photos to analyse screenshots for scams."
+        }
+      ]
+    ]
+  }
+}

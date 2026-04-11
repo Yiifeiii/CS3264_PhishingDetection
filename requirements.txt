@@ -22,3 +22,8 @@ easyocr
 # Utilities
 tqdm>=4.66.0
 matplotlib>=3.10.0
+
+# API server
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
