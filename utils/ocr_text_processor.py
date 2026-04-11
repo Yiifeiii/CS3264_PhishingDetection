@@ -68,6 +68,22 @@ class OCRTextProcessor:
                 "warning": "Chinese characters removed, but no usable non-Chinese text remained.",
             }
 
+        if self.policy == "route":
+            preserved = self._clean_ocr_text(normalized, preserve_chinese=True)
+            if preserved:
+                return {
+                    "text": preserved,
+                    "contains_chinese": True,
+                    "action": "routed_chinese",
+                    "warning": "Chinese text preserved for dedicated Chinese-model routing.",
+                }
+            return {
+                "text": "",
+                "contains_chinese": True,
+                "action": "route_empty",
+                "warning": "Chinese text detected, but no usable text remained after cleanup.",
+            }
+
         translated = self._translate(normalized)
         translated = self._clean_ocr_text(translated or "")
         if translated:
@@ -127,13 +143,13 @@ class OCRTextProcessor:
         without_chinese = self.CHINESE_PATTERN.sub(" ", text)
         return self.MULTISPACE_PATTERN.sub(" ", without_chinese).strip()
 
-    def _clean_ocr_text(self, text: str) -> str:
+    def _clean_ocr_text(self, text: str, preserve_chinese: bool = False) -> str:
         if not text:
             return ""
 
         kept_tokens = []
         for token in self.TOKEN_PATTERN.findall(text):
-            cleaned = self._clean_token(token)
+            cleaned = self._clean_token(token, preserve_chinese=preserve_chinese)
             if cleaned:
                 kept_tokens.append(cleaned)
 
@@ -141,7 +157,7 @@ class OCRTextProcessor:
         normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
         return self.MULTISPACE_PATTERN.sub(" ", normalized).strip()
 
-    def _clean_token(self, token: str) -> str:
+    def _clean_token(self, token: str, preserve_chinese: bool = False) -> str:
         token = token.strip()
         if not token:
             return ""
@@ -153,7 +169,8 @@ class OCRTextProcessor:
         if re.fullmatch(r"[+\d][\d\s-]{5,}", token):
             return token
 
-        cleaned = re.sub(r"^[^A-Za-z0-9$+]+|[^A-Za-z0-9$+]+$", "", token)
+        allowed = r"A-Za-z0-9$+\u4e00-\u9fff" if preserve_chinese else r"A-Za-z0-9$+"
+        cleaned = re.sub(fr"^[^{allowed}]+|[^{allowed}]+$", "", token)
         if not cleaned:
             return ""
 
@@ -161,8 +178,11 @@ class OCRTextProcessor:
         alpha_count = sum(char.isalpha() for char in cleaned)
         digit_count = sum(char.isdigit() for char in cleaned)
         symbol_count = len(cleaned) - alnum_count
+        contains_chinese = bool(self.CHINESE_PATTERN.search(cleaned))
 
         if alnum_count == 0:
+            return ""
+        if contains_chinese and len(cleaned) == 1:
             return ""
         if len(cleaned) <= 2 and alpha_count == 0:
             return ""

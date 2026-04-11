@@ -18,7 +18,7 @@ from utils.text_risk_analyzer import TextRiskAnalyzer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate OCR + DistilBERT phishing-text accuracy on labeled image folders."
+        description="Evaluate OCR + bilingual phishing-text accuracy on labeled image folders."
     )
     parser.add_argument(
         "--phishing-dir",
@@ -34,7 +34,13 @@ def parse_args() -> argparse.Namespace:
         "--threshold",
         type=float,
         default=None,
-        help="Decision threshold for the calibrated text score. Defaults to MEDIUM_RISK_THRESHOLD.",
+        help="Decision threshold for the combined text score. Defaults to MEDIUM_RISK_THRESHOLD.",
+    )
+    parser.add_argument(
+        "--decision-source",
+        choices=["combined", "model"],
+        default="combined",
+        help="Whether predictions should use the full text score or the model-only score.",
     )
     parser.add_argument(
         "--limit",
@@ -44,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--chinese-policy",
-        choices=["strip", "skip", "translate"],
+        choices=["strip", "skip", "translate", "route"],
         default=None,
         help="How to handle OCR text containing Chinese characters.",
     )
@@ -112,8 +118,14 @@ def main() -> int:
     chinese_hits = 0
     translated_count = 0
     stripped_count = 0
+    routed_count = 0
     skipped_chinese: list[str] = []
     chinese_samples: list[dict[str, str]] = []
+    route_counts = {
+        "english": 0,
+        "english_stripped_fallback": 0,
+        "chinese": 0,
+    }
 
     dataset = [(1, p) for p in phishing_files] + [(0, p) for p in non_phishing_files]
 
@@ -136,6 +148,8 @@ def main() -> int:
             translated_count += 1
         if processed.get("action") == "stripped_chinese":
             stripped_count += 1
+        if processed.get("action") == "routed_chinese":
+            routed_count += 1
         if not text or not text.strip():
             if processed.get("action") in {"skipped_chinese", "translation_unavailable"}:
                 skipped_chinese.append(str(image_path))
@@ -143,7 +157,10 @@ def main() -> int:
             continue
 
         result = analyzer.analyze(text)
-        score = float(result.get("model_score") or 0.0)
+        if result.get("model_route") in route_counts:
+            route_counts[str(result.get("model_route"))] += 1
+        score_key = "score" if args.decision_source == "combined" else "model_score"
+        score = float(result.get(score_key) or 0.0)
         pred = 1 if score >= threshold else 0
         used_images.append(str(image_path))
 
@@ -156,11 +173,14 @@ def main() -> int:
                     "path": str(image_path),
                     "true_label": label,
                     "pred_label": pred,
-                    "model_score": score,
+                    "decision_score": score,
+                    "combined_score": result.get("score"),
+                    "model_score": result.get("model_score"),
                     "model_score_raw": result.get("model_score_raw"),
                     "text_preview": (text[:160] + "...") if len(text) > 160 else text,
                     "filtered_preview": ((result.get("filtered_text") or "")[:160] + "...") if len(result.get("filtered_text") or "") > 160 else (result.get("filtered_text") or ""),
                     "kept_chunks": result.get("relevant_chunks") or [],
+                    "model_route": result.get("model_route"),
                 }
             )
 
@@ -176,10 +196,15 @@ def main() -> int:
     print(f"Chinese policy: {cfg.OCR_CHINESE_POLICY}")
     print(f"Translated Chinese texts: {translated_count}")
     print(f"Stripped Chinese texts: {stripped_count}")
+    print(f"Routed Chinese texts: {routed_count}")
     print(f"OCR active languages: {ocr.active_languages}")
     print(f"OCR load warning: {ocr.load_error}")
+    print(f"Decision source: {args.decision_source}")
     print(f"Threshold: {threshold:.2f}")
-    print(f"Model loaded: {analyzer.model.is_loaded}")
+    print(f"English model loaded: {analyzer.model.is_loaded}")
+    print(f"Chinese model loaded: {bool(analyzer.chinese_model and analyzer.chinese_model.is_loaded)}")
+    print(f"Chinese model load warning: {None if analyzer.chinese_model is None else analyzer.chinese_model.load_error}")
+    print(f"Model routes used: {route_counts}")
     print(f"Translator loaded: {processor.is_loaded}")
     print(f"Translator load warning: {processor.load_error}")
     print()
@@ -201,8 +226,9 @@ def main() -> int:
         for item in mistakes[:10]:
             print(
                 f"- {item['path']} | true={item['true_label']} pred={item['pred_label']} "
-                f"| score={item['model_score']:.4f} raw={item['model_score_raw']} "
-                f"| text={item['text_preview']}"
+                f"| decision_score={item['decision_score']:.4f} combined={item['combined_score']} "
+                f"| model={item['model_score']} raw={item['model_score_raw']} "
+                f"| route={item['model_route']} | text={safe_console_text(item['text_preview'])}"
             )
             if item['filtered_preview']:
                 print(f"  filtered={safe_console_text(item['filtered_preview'])}")
