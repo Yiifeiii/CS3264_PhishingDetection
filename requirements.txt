@@ -21,3 +21,4 @@ easyocr
 
 # Utilities
 tqdm>=4.66.0
+matplotlib>=3.10.0

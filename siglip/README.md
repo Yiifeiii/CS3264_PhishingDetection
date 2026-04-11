@@ -34,7 +34,8 @@ This mapping is defined in `config.py`.
 ## What Each Script Does
 
 - `../scripts/split_siglip_dataset.py`
-  - Splits `data/raw/{real,fake}` into `data/sglip/{train,val,test}/{real,fake}`
+  - Splits one or more labeled roots into `data/sglip/{train,val,test}/{real,fake}`
+  - Example roots: `data/chat`, `data/social`
   - Copies images instead of moving them
 - `extract_embeddings.py`
   - Runs SigLIP on `train`, `val`, and `test`
@@ -54,7 +55,20 @@ This mapping is defined in `config.py`.
 If you have not created the split yet:
 
 ```bash
-./venv/bin/python scripts/split_siglip_dataset.py
+./venv/bin/python scripts/split_siglip_dataset.py \
+  --source-root data/chat \
+  --output-root data/sglip \
+  --clear-output
+```
+
+To merge `chat` and `social` into one experiment:
+
+```bash
+./venv/bin/python scripts/split_siglip_dataset.py \
+  --source-root data/chat \
+  --source-root data/social \
+  --output-root data/sglip \
+  --clear-output
 ```
 
 Extract embeddings:
