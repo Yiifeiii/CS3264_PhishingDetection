@@ -29,14 +29,23 @@ class OCRService:
         if self.reader is None:
             return ""
 
-        original_text = self._join_results(self.reader.readtext(image_path, detail=0))
-        processed_image = self._preprocess_for_ocr(image_path)
-        processed_text = self._join_results(self.reader.readtext(processed_image, detail=0))
+        try:
+            original_image = self._load_image_rgb(image_path)
+        except Exception:
+            return ""
+
+        original_text = self._safe_readtext(np.array(original_image))
+        processed_image = self._preprocess_for_ocr(original_image)
+        processed_text = self._safe_readtext(processed_image)
 
         return self._pick_best_text(original_text, processed_text)
 
-    def _preprocess_for_ocr(self, image_path: str):
-        image = Image.open(image_path).convert("RGB")
+    def _load_image_rgb(self, image_path: str):
+        return Image.open(image_path).convert("RGB")
+
+    def _preprocess_for_ocr(self, image):
+        if not isinstance(image, Image.Image):
+            image = self._load_image_rgb(image)
 
         # Upscale small screenshot text so the OCR recognizer gets clearer glyphs.
         width, height = image.size
@@ -49,6 +58,12 @@ class OCRService:
         grayscale = grayscale.filter(ImageFilter.MedianFilter(size=3))
 
         return np.array(grayscale)
+
+    def _safe_readtext(self, image) -> str:
+        try:
+            return self._join_results(self.reader.readtext(image, detail=0))
+        except Exception:
+            return ""
 
     def _join_results(self, results) -> str:
         return " ".join(str(item).strip() for item in results if str(item).strip())

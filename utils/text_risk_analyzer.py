@@ -4,6 +4,15 @@ from urllib.parse import urlsplit
 from utils.text_model_service import TextModelService
 
 
+class _UnavailableTextModel:
+    def __init__(self):
+        self.is_loaded = False
+        self.load_error = None
+
+    def predict_phishing_probability(self, text: str):
+        return None
+
+
 class TextRiskAnalyzer:
     CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
     URL_PATTERN = re.compile(r"(https?://[^\s]+|www\.[^\s]+|\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/[^\s]*)?\b)")
@@ -12,18 +21,22 @@ class TextRiskAnalyzer:
     MONEY_PATTERN = re.compile(r"(\$\s?\d+(?:[\.,]\d{1,2})?|\b\d+(?:[\.,]\d{1,2})?\s?(?:usd|sgd|rm)\b)", re.IGNORECASE)
     SENTENCE_SPLIT_PATTERN = re.compile(r"(?:[!?;]|\.(?=\s)|\n)+")
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, load_models: bool = True):
         self.cfg = cfg
-        self.model = TextModelService(
-            cfg.TEXT_PHISHING_MODEL_NAME,
-            cfg.DEVICE,
-            cfg.TEXT_MODEL_POSITIVE_CLASS_INDEX,
-        )
-        self.chinese_model = TextModelService(
-            getattr(cfg, "CHINESE_TEXT_PHISHING_MODEL_NAME", ""),
-            cfg.DEVICE,
-            getattr(cfg, "CHINESE_TEXT_MODEL_POSITIVE_CLASS_INDEX", None),
-        ) if getattr(cfg, "CHINESE_TEXT_PHISHING_MODEL_NAME", "") else None
+        if load_models:
+            self.model = TextModelService(
+                cfg.TEXT_PHISHING_MODEL_NAME,
+                cfg.DEVICE,
+                cfg.TEXT_MODEL_POSITIVE_CLASS_INDEX,
+            )
+            self.chinese_model = TextModelService(
+                getattr(cfg, "CHINESE_TEXT_PHISHING_MODEL_NAME", ""),
+                cfg.DEVICE,
+                getattr(cfg, "CHINESE_TEXT_MODEL_POSITIVE_CLASS_INDEX", None),
+            ) if getattr(cfg, "CHINESE_TEXT_PHISHING_MODEL_NAME", "") else None
+        else:
+            self.model = _UnavailableTextModel()
+            self.chinese_model = _UnavailableTextModel() if getattr(cfg, "CHINESE_TEXT_PHISHING_MODEL_NAME", "") else None
         self.trusted_email_addresses = {
             self._normalize_email(email)
             for email in getattr(cfg, "TRUSTED_EMAIL_ADDRESSES", ())
@@ -55,10 +68,59 @@ class TextRiskAnalyzer:
             reverse=True,
         ))
 
-    def analyze(self, text: str):
+    def prepare_model_input(self, text: str):
         normalized = (text or "").strip()
         relevant_chunks, dropped_chunks = self._select_relevant_chunks(normalized)
         filtered_text = " ".join(relevant_chunks).strip()
+
+        detected_urls = self._extract_urls(filtered_text)
+        detected_emails = self.EMAIL_PATTERN.findall(filtered_text)
+        detected_phone_numbers = self._extract_phone_numbers(filtered_text)
+        trusted_urls, urls = self._partition_trusted_urls(detected_urls)
+        trusted_emails, emails = self._partition_trusted_emails(detected_emails)
+        trusted_phone_numbers, phone_numbers = self._partition_trusted_phone_numbers(detected_phone_numbers)
+
+        model_input_text = filtered_text
+        masked_trusted_contacts = []
+        if getattr(self.cfg, "MASK_TRUSTED_CONTACTS_FOR_MODEL", False):
+            model_input_text, masked_trusted_contacts = self._mask_trusted_contacts_for_model(
+                filtered_text,
+                trusted_urls,
+                trusted_emails,
+                trusted_phone_numbers,
+            )
+        masked_phone_numbers_for_model = []
+        if getattr(self.cfg, "MASK_ALL_PHONE_NUMBERS_FOR_MODEL", False):
+            model_input_text, masked_phone_numbers_for_model = self._mask_phone_numbers_for_model(
+                model_input_text,
+                detected_phone_numbers,
+            )
+
+        return {
+            "input_text": normalized,
+            "filtered_text": filtered_text,
+            "model_input_text": model_input_text,
+            "relevant_chunks": relevant_chunks,
+            "dropped_chunks": dropped_chunks,
+            "detected_urls": detected_urls,
+            "urls": urls,
+            "trusted_urls": trusted_urls,
+            "detected_emails": detected_emails,
+            "emails": emails,
+            "trusted_emails": trusted_emails,
+            "detected_phone_numbers": detected_phone_numbers,
+            "phone_numbers": phone_numbers,
+            "trusted_phone_numbers": trusted_phone_numbers,
+            "masked_trusted_contacts": masked_trusted_contacts,
+            "masked_phone_numbers_for_model": masked_phone_numbers_for_model,
+        }
+
+    def analyze(self, text: str):
+        prepared = self.prepare_model_input(text)
+        normalized = prepared["input_text"]
+        relevant_chunks = prepared["relevant_chunks"]
+        dropped_chunks = prepared["dropped_chunks"]
+        filtered_text = prepared["filtered_text"]
         lowered = filtered_text.lower()
         denoised = self._denoise_for_keywords(lowered)
 
@@ -74,12 +136,15 @@ class TextRiskAnalyzer:
                 matched_groups[group_name] = hits
                 total_hits += len(hits)
 
-        detected_urls = self._extract_urls(filtered_text)
-        detected_emails = self.EMAIL_PATTERN.findall(filtered_text)
-        detected_phone_numbers = self._extract_phone_numbers(filtered_text)
-        trusted_urls, urls = self._partition_trusted_urls(detected_urls)
-        trusted_emails, emails = self._partition_trusted_emails(detected_emails)
-        trusted_phone_numbers, phone_numbers = self._partition_trusted_phone_numbers(detected_phone_numbers)
+        detected_urls = prepared["detected_urls"]
+        detected_emails = prepared["detected_emails"]
+        detected_phone_numbers = prepared["detected_phone_numbers"]
+        trusted_urls = prepared["trusted_urls"]
+        urls = prepared["urls"]
+        trusted_emails = prepared["trusted_emails"]
+        emails = prepared["emails"]
+        trusted_phone_numbers = prepared["trusted_phone_numbers"]
+        phone_numbers = prepared["phone_numbers"]
         money_mentions = self.MONEY_PATTERN.findall(filtered_text)
         benign_hits = self._collect_term_hits(
             lowered,
@@ -148,21 +213,9 @@ class TextRiskAnalyzer:
 
         rule_score = min(rule_score, 1.0)
 
-        model_input_text = filtered_text
-        masked_trusted_contacts = []
-        if getattr(self.cfg, "MASK_TRUSTED_CONTACTS_FOR_MODEL", False):
-            model_input_text, masked_trusted_contacts = self._mask_trusted_contacts_for_model(
-                filtered_text,
-                trusted_urls,
-                trusted_emails,
-                trusted_phone_numbers,
-            )
-        masked_phone_numbers_for_model = []
-        if getattr(self.cfg, "MASK_ALL_PHONE_NUMBERS_FOR_MODEL", False):
-            model_input_text, masked_phone_numbers_for_model = self._mask_phone_numbers_for_model(
-                model_input_text,
-                detected_phone_numbers,
-            )
+        model_input_text = prepared["model_input_text"]
+        masked_trusted_contacts = prepared["masked_trusted_contacts"]
+        masked_phone_numbers_for_model = prepared["masked_phone_numbers_for_model"]
 
         model_chunks = self._split_text_for_model(model_input_text)
         chunk_scores = []
@@ -302,9 +355,14 @@ class TextRiskAnalyzer:
         if score is None:
             return None
         threshold = self.cfg.MODEL_POSITIVE_THRESHOLD
+        threshold = max(min(float(threshold), 0.999999), 0.000001)
+        score = max(0.0, min(float(score), 1.0))
+
         if score <= threshold:
-            return 0.0
-        return min((score - threshold) / (1.0 - threshold), 1.0)
+            return 0.5 * (score / threshold)
+
+        upper_span = max(1.0 - threshold, 0.000001)
+        return min(0.5 + 0.5 * ((score - threshold) / upper_span), 1.0)
 
     def _select_relevant_chunks(self, text: str):
         normalized = (text or "").strip()
