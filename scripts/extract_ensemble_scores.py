@@ -63,6 +63,11 @@ def parse_args() -> argparse.Namespace:
         default=str(LOGREG_MODEL_FILE),
         help="Path to the trained SigLIP classifier .joblib.",
     )
+    p.add_argument(
+        "--fast",
+        action="store_true",
+        help="Skip OCR preprocessing (single-pass, ~2x faster).",
+    )
     return p.parse_args()
 
 
@@ -104,13 +109,16 @@ def extract_text_scores(
     ocr: OCRService,
     processor: OCRTextProcessor,
     analyzer: TextRiskAnalyzer,
+    fast: bool = False,
 ) -> dict[str, dict]:
     """Return {filename: {label, raw_model, preprocess_model, heuristic, combined}}."""
     result: dict[str, dict] = {}
 
-    for label, img_path in image_pairs:
+    total = len(image_pairs)
+    for i, (label, img_path) in enumerate(image_pairs, 1):
         fname = img_path.name
-        raw_text = ocr.extract_text(str(img_path))
+        print(f"    [{i}/{total}] OCR: {fname}", flush=True)
+        raw_text = ocr.extract_text(str(img_path), skip_preprocess=fast)
         processed = processor.process(raw_text)
         processed_text = str(processed.get("text") or "").strip()
 
@@ -174,6 +182,7 @@ def build_split(
     ocr: OCRService,
     processor: OCRTextProcessor,
     analyzer: TextRiskAnalyzer,
+    fast: bool = False,
 ) -> list[dict]:
     print(f"\n=== Processing {split_name} split ===")
 
@@ -184,7 +193,7 @@ def build_split(
     # Text scores
     image_pairs = collect_images(data_dir)
     print(f"  Text:   {len(image_pairs)} images from {data_dir}")
-    text_scores = extract_text_scores(image_pairs, ocr, processor, analyzer)
+    text_scores = extract_text_scores(image_pairs, ocr, processor, analyzer, fast=fast)
 
     # Merge on filename
     all_fnames = set(siglip.keys()) | set(text_scores.keys())
@@ -247,7 +256,7 @@ def main() -> int:
         if not embed_file.exists():
             print(f"WARNING: {embed_file} not found, skipping {split_name}")
             continue
-        rows = build_split(split_name, embed_file, data_subdir, clf_path, ocr, processor, analyzer)
+        rows = build_split(split_name, embed_file, data_subdir, clf_path, ocr, processor, analyzer, fast=args.fast)
         out_path = output_dir / f"{split_name}_scores.csv"
         write_csv(out_path, rows)
         print(f"  Saved: {out_path} ({len(rows)} rows)")

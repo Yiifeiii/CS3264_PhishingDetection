@@ -25,7 +25,7 @@ class OCRService:
             else:
                 self.reader = None
 
-    def extract_text(self, image_path: str) -> str:
+    def extract_text(self, image_path: str, skip_preprocess: bool = False) -> str:
         if self.reader is None:
             return ""
 
@@ -35,6 +35,10 @@ class OCRService:
             return ""
 
         original_text = self._safe_readtext(np.array(original_image))
+
+        if skip_preprocess:
+            return original_text.strip()
+
         processed_image = self._preprocess_for_ocr(original_image)
         processed_text = self._safe_readtext(processed_image)
 

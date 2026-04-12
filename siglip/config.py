@@ -50,7 +50,7 @@ def detect_device():
 
 DEVICE = os.getenv("SIGLIP_DEVICE", detect_device())
 BATCH_SIZE = 16
-NUM_WORKERS = int(os.getenv("SIGLIP_NUM_WORKERS", "4"))
+NUM_WORKERS = int(os.getenv("SIGLIP_NUM_WORKERS", "0" if DEVICE == "mps" else "4"))
 
 # ===== Output =====
 TRAIN_EMBED_FILE = EMBED_DIR / "train_embeddings.npz"
