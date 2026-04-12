@@ -31,6 +31,17 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing non-phishing images.",
     )
     parser.add_argument(
+        "--text-model",
+        default="",
+        help="Optional local path or Hugging Face id for the English text model.",
+    )
+    parser.add_argument(
+        "--text-positive-class-index",
+        type=int,
+        default=None,
+        help="Optional positive/spam class index override for the English text model.",
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=None,
@@ -156,6 +167,10 @@ def main() -> int:
     cfg = Config()
     if args.chinese_policy is not None:
         cfg.OCR_CHINESE_POLICY = args.chinese_policy
+    if args.text_model:
+        cfg.TEXT_PHISHING_MODEL_NAME = args.text_model
+    if args.text_positive_class_index is not None:
+        cfg.TEXT_MODEL_POSITIVE_CLASS_INDEX = args.text_positive_class_index
     threshold = args.threshold if args.threshold is not None else cfg.MEDIUM_RISK_THRESHOLD
     threshold_source = "command line" if args.threshold is not None else "config default"
 
@@ -279,6 +294,7 @@ def main() -> int:
     print(f"Decision source: {args.decision_source}")
     print(f"Threshold: {threshold:.2f}")
     print(f"Threshold source: {threshold_source}")
+    print(f"English model path: {cfg.TEXT_PHISHING_MODEL_NAME}")
     if auto_metrics is not None:
         print(
             "Auto-threshold metrics: "
