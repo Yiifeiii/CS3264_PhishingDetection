@@ -1,4 +1,7 @@
 import argparse
+import os
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import joblib
 

@@ -41,6 +41,8 @@ from train_bayesian_ensemble import NaiveBayesKDE  # noqa: E402,F401
 
 FEATURE_COLUMNS = [
     "siglip_logreg_prob",
+    "siglip_lightgbm_prob",
+    "siglip_xgboost_prob",
     "text_combined_score",
     "text_heuristic_score",
     "text_preprocess_model_score",
@@ -126,24 +128,27 @@ def main() -> int:
     X_test, y_test, filenames = load_scores(test_csv, feature_names)
     print(f"Test set: {len(y_test)} samples ({np.sum(y_test==0)} legit, {np.sum(y_test==1)} phishing)")
 
-    siglip_idx = feature_names.index("siglip_logreg_prob")
     text_idx = feature_names.index("text_combined_score")
 
     # Collect all methods and their predictions
     methods: dict[str, dict] = {}
 
-    # Baseline: SigLIP alone
-    probs = X_test[:, siglip_idx]
-    preds = (probs >= 0.5).astype(int)
-    methods["SigLIP alone"] = {"preds": preds, "probs": probs}
+    # Baseline: SigLIP models alone
+    for col in ["siglip_logreg_prob", "siglip_lightgbm_prob", "siglip_xgboost_prob"]:
+        idx = feature_names.index(col)
+        probs = X_test[:, idx]
+        preds = (probs >= 0.5).astype(int)
+        model_name = col.replace("siglip_", "").replace("_prob", "")
+        methods[f"SigLIP {model_name}"] = {"preds": preds, "probs": probs}
 
     # Baseline: Text combined alone
     probs = X_test[:, text_idx]
     preds = (probs >= 0.5).astype(int)
     methods["Text combined alone"] = {"preds": preds, "probs": probs}
 
-    # Baseline: Weighted average 35/65
-    probs = 0.35 * X_test[:, siglip_idx] + 0.65 * X_test[:, text_idx]
+    # Baseline: Weighted average 35/65 (using xgboost)
+    xgboost_idx = feature_names.index("siglip_xgboost_prob")
+    probs = 0.35 * X_test[:, xgboost_idx] + 0.65 * X_test[:, text_idx]
     preds = (probs >= 0.5).astype(int)
     methods["Weighted avg (35/65)"] = {"preds": preds, "probs": probs}
 

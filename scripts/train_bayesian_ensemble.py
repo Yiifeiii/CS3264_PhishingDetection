@@ -48,6 +48,8 @@ from sklearn.neighbors import KernelDensity
 
 FEATURE_COLUMNS = [
     "siglip_logreg_prob",
+    "siglip_lightgbm_prob",
+    "siglip_xgboost_prob",
     "text_combined_score",
     "text_heuristic_score",
     "text_preprocess_model_score",
@@ -136,6 +138,8 @@ class NaiveBayesKDE:
         n_phish = max(len(X_phish), 1)
         n_legit = max(len(X_legit), 1)
         self.log_prior_ratio = float(np.log(n_phish / n_legit))
+        print(f"  Log prior ratio: {self.log_prior_ratio:.4f} (n_phish={n_phish}, n_legit={n_legit})")
+        # -0.2007 (n_phish=18, n_legit=22)
 
         self.kdes_phishing = []
         self.kdes_legit = []
@@ -157,7 +161,8 @@ class NaiveBayesKDE:
             log_l = self.kdes_legit[j].score_samples(X[:, j:j+1])
             log_odds += log_p - log_l
 
-        # sigmoid to convert log-odds to probability
+        # sigmoid to convert log-odds to probability (clip to avoid overflow in exp)
+        log_odds = np.clip(log_odds, -500, 500)
         prob_phishing = 1.0 / (1.0 + np.exp(-log_odds))
         return np.column_stack([1.0 - prob_phishing, prob_phishing])
 
@@ -254,13 +259,16 @@ def main() -> int:
 
     report: dict = {"features": feature_names, "results": {}}
 
-    # ── Baseline 1: SigLIP alone ────────────────────────────────────
-    siglip_idx = feature_names.index("siglip_logreg_prob")
-    siglip_probs_test = X_test[:, siglip_idx]
-    siglip_preds_test = (siglip_probs_test >= 0.5).astype(int)
-    m = compute_metrics(y_test, siglip_preds_test, siglip_probs_test)
-    report["results"]["siglip_alone"] = m
-    print(f"\n[Baseline] SigLIP alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
+    # ── Baseline 1: SigLIP models alone ──────────────────────────────
+    siglip_models = ["siglip_logreg_prob", "siglip_lightgbm_prob", "siglip_xgboost_prob"]
+    for col in siglip_models:
+        idx = feature_names.index(col)
+        probs = X_test[:, idx]
+        preds = (probs >= 0.5).astype(int)
+        m = compute_metrics(y_test, preds, probs)
+        model_name = col.replace("siglip_", "").replace("_prob", "")
+        report["results"][f"siglip_{model_name}_alone"] = m
+        print(f"\n[Baseline] SigLIP {model_name} alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
 
     # ── Baseline 2: Best text pipeline alone ────────────────────────
     text_idx = feature_names.index("text_combined_score")
@@ -270,8 +278,9 @@ def main() -> int:
     report["results"]["text_alone"] = m
     print(f"[Baseline] Text combined alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
 
-    # ── Baseline 3: Current weighted average (35/65) ────────────────
-    wa_probs_test = weighted_average_baseline(X_test, siglip_idx, text_idx)
+    # ── Baseline 3: Current weighted average (35/65) using xgboost ───
+    xgboost_idx = feature_names.index("siglip_xgboost_prob")
+    wa_probs_test = weighted_average_baseline(X_test, xgboost_idx, text_idx)
     wa_preds_test = (wa_probs_test >= 0.5).astype(int)
     m = compute_metrics(y_test, wa_preds_test, wa_probs_test)
     report["results"]["weighted_average_35_65"] = m
