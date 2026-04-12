@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
 
 from ocr.ocr_service import OCRService
 from utils.config import Config
@@ -38,9 +38,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--decision-source",
-        choices=["combined", "model"],
+        choices=["combined", "model", "model_raw"],
         default="combined",
-        help="Whether predictions should use the full text score or the model-only score.",
+        help="Whether predictions should use the full text score, calibrated model score, or raw model probability.",
+    )
+    parser.add_argument(
+        "--auto-threshold",
+        action="store_true",
+        help="Search the evaluated scores and choose the threshold that maximizes the selected objective.",
+    )
+    parser.add_argument(
+        "--auto-threshold-objective",
+        choices=["accuracy", "f1", "precision", "recall"],
+        default="accuracy",
+        help="Metric used when --auto-threshold is enabled.",
     )
     parser.add_argument(
         "--limit",
@@ -85,12 +96,68 @@ def safe_console_text(text: str) -> str:
     return normalized.encode("cp1252", errors="backslashreplace").decode("cp1252")
 
 
+def resolve_score_key(decision_source: str) -> str:
+    return {
+        "combined": "score",
+        "model": "model_score",
+        "model_raw": "model_score_raw",
+    }[decision_source]
+
+
+def compute_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, float]:
+    accuracy = accuracy_score(y_true, y_pred)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        average="binary",
+        zero_division=0,
+    )
+    return {
+        "accuracy": float(accuracy),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+    }
+
+
+def pick_best_threshold(records: list[dict[str, object]], objective: str) -> tuple[float, dict[str, float]]:
+    scores = [float(record["decision_score"]) for record in records]
+    labels = [int(record["true_label"]) for record in records]
+    if not scores:
+        raise ValueError("No scored rows available for threshold search.")
+
+    candidate_thresholds = sorted(set(scores))
+    candidate_thresholds = [0.0] + candidate_thresholds + [max(scores) + 1e-6]
+
+    best_threshold = candidate_thresholds[0]
+    best_metrics = {"accuracy": -1.0, "precision": -1.0, "recall": -1.0, "f1": -1.0}
+    best_key = (-1.0, -1.0, -1.0, -1.0, 0.0)
+
+    for threshold in candidate_thresholds:
+        preds = [1 if score >= threshold else 0 for score in scores]
+        metrics = compute_metrics(labels, preds)
+        comparison_key = (
+            metrics[objective],
+            metrics["accuracy"],
+            metrics["f1"],
+            metrics["precision"],
+            -threshold,
+        )
+        if comparison_key > best_key:
+            best_key = comparison_key
+            best_threshold = threshold
+            best_metrics = metrics
+
+    return best_threshold, best_metrics
+
+
 def main() -> int:
     args = parse_args()
     cfg = Config()
     if args.chinese_policy is not None:
         cfg.OCR_CHINESE_POLICY = args.chinese_policy
     threshold = args.threshold if args.threshold is not None else cfg.MEDIUM_RISK_THRESHOLD
+    threshold_source = "command line" if args.threshold is not None else "config default"
 
     phishing_dir = Path(args.phishing_dir)
     non_phishing_dir = Path(args.non_phishing_dir)
@@ -110,9 +177,6 @@ def main() -> int:
     processor = OCRTextProcessor(cfg)
     analyzer = TextRiskAnalyzer(cfg)
 
-    y_true: list[int] = []
-    y_pred: list[int] = []
-    mistakes: list[dict[str, object]] = []
     skipped_no_text: list[str] = []
     used_images: list[str] = []
     chinese_hits = 0
@@ -126,6 +190,7 @@ def main() -> int:
         "english_stripped_fallback": 0,
         "chinese": 0,
     }
+    scored_records: list[dict[str, object]] = []
 
     dataset = [(1, p) for p in phishing_files] + [(0, p) for p in non_phishing_files]
 
@@ -159,36 +224,48 @@ def main() -> int:
         result = analyzer.analyze(text)
         if result.get("model_route") in route_counts:
             route_counts[str(result.get("model_route"))] += 1
-        score_key = "score" if args.decision_source == "combined" else "model_score"
+        score_key = resolve_score_key(args.decision_source)
         score = float(result.get(score_key) or 0.0)
-        pred = 1 if score >= threshold else 0
         used_images.append(str(image_path))
 
-        y_true.append(label)
-        y_pred.append(pred)
+        scored_records.append(
+            {
+                "path": str(image_path),
+                "true_label": label,
+                "decision_score": score,
+                "combined_score": result.get("score"),
+                "model_score": result.get("model_score"),
+                "model_score_raw": result.get("model_score_raw"),
+                "text_preview": (text[:160] + "...") if len(text) > 160 else text,
+                "filtered_preview": ((result.get("filtered_text") or "")[:160] + "...") if len(result.get("filtered_text") or "") > 160 else (result.get("filtered_text") or ""),
+                "kept_chunks": result.get("relevant_chunks") or [],
+                "model_route": result.get("model_route"),
+            }
+        )
 
-        if pred != label:
-            mistakes.append(
-                {
-                    "path": str(image_path),
-                    "true_label": label,
-                    "pred_label": pred,
-                    "decision_score": score,
-                    "combined_score": result.get("score"),
-                    "model_score": result.get("model_score"),
-                    "model_score_raw": result.get("model_score_raw"),
-                    "text_preview": (text[:160] + "...") if len(text) > 160 else text,
-                    "filtered_preview": ((result.get("filtered_text") or "")[:160] + "...") if len(result.get("filtered_text") or "") > 160 else (result.get("filtered_text") or ""),
-                    "kept_chunks": result.get("relevant_chunks") or [],
-                    "model_route": result.get("model_route"),
-                }
-            )
-
-    if not y_true:
+    if not scored_records:
         raise ValueError("No images with OCR text were found to evaluate.")
 
+    if args.auto_threshold and args.threshold is not None:
+        raise ValueError("Use either --threshold or --auto-threshold, not both.")
+
+    if args.auto_threshold:
+        threshold, auto_metrics = pick_best_threshold(scored_records, args.auto_threshold_objective)
+        threshold_source = f"auto-threshold ({args.auto_threshold_objective})"
+    else:
+        auto_metrics = None
+
+    y_true = [int(item["true_label"]) for item in scored_records]
+    y_pred = [1 if float(item["decision_score"]) >= threshold else 0 for item in scored_records]
+    mistakes: list[dict[str, object]] = []
+    for item, pred in zip(scored_records, y_pred):
+        if pred != int(item["true_label"]):
+            mistake = dict(item)
+            mistake["pred_label"] = pred
+            mistakes.append(mistake)
+
     print(f"Scanned {len(dataset)} images")
-    print(f"Evaluated with OCR text: {len(y_true)}")
+    print(f"Evaluated with OCR text: {len(scored_records)}")
     print(f"Phishing images: {len(phishing_files)}")
     print(f"Non-phishing images: {len(non_phishing_files)}")
     print(f"Skipped with no OCR text: {len(skipped_no_text)}")
@@ -201,6 +278,15 @@ def main() -> int:
     print(f"OCR load warning: {ocr.load_error}")
     print(f"Decision source: {args.decision_source}")
     print(f"Threshold: {threshold:.2f}")
+    print(f"Threshold source: {threshold_source}")
+    if auto_metrics is not None:
+        print(
+            "Auto-threshold metrics: "
+            f"accuracy={auto_metrics['accuracy']:.4f} "
+            f"precision={auto_metrics['precision']:.4f} "
+            f"recall={auto_metrics['recall']:.4f} "
+            f"f1={auto_metrics['f1']:.4f}"
+        )
     print(f"English model loaded: {analyzer.model.is_loaded}")
     print(f"Chinese model loaded: {bool(analyzer.chinese_model and analyzer.chinese_model.is_loaded)}")
     print(f"Chinese model load warning: {None if analyzer.chinese_model is None else analyzer.chinese_model.load_error}")

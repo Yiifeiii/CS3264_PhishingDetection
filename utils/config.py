@@ -5,7 +5,8 @@ class Config:
 
     # model
     DEEPFAKE_MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
-    TEXT_PHISHING_MODEL_NAME = "cybersectony/phishing-email-detection-distilbert_v2.4.1"
+    # TEXT_PHISHING_MODEL_NAME = "cybersectony/phishing-email-detection-distilbert_v2.4.1"
+    TEXT_PHISHING_MODEL_NAME = "artifacts/distilbert_route_pipeline/model"
     TEXT_MODEL_POSITIVE_CLASS_INDEX = 1
     # Experimental Chinese spam-email proxy model. This is the closest Chinese
     # sequence-classification checkpoint we found that exposes an explicit spam
@@ -16,9 +17,9 @@ class Config:
 
     # paths
     RAW_IMAGE_DIR = "data/raw"
-    SUPPORTED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+    SUPPORTED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".avif")
     OCR_LANGUAGES = ("en", "ch_sim")
-    OCR_CHINESE_POLICY = "strip"  # valid options: "strip", "skip", "translate", "route"
+    OCR_CHINESE_POLICY = "route"  # valid options: "strip", "skip", "translate", "route"
 
     # Allowlisted contacts suppress email/phone phishing heuristics but do not
     # hard-mark the sample as safe. Keep these lists tight and review them.
@@ -67,6 +68,11 @@ class Config:
             "suspended",
             "expired",
             "verify now",
+            "act now",
+            "within hours",
+            "final notice",
+            "last chance",
+            "warning",
         ],
         "credential_request": [
             "password",
@@ -75,8 +81,13 @@ class Config:
             "login",
             "sign in",
             "verification code",
+            "security code",
+            "one time code",
+            "passcode",
             "account verification",
             "verify your identity",
+            "confirm your identity",
+            "confirm your details",
             "identity",
             "account freeze",
         ],
@@ -91,6 +102,11 @@ class Config:
             "money",
             "initial deposit",
             "activation fee",
+            "processing fee",
+            "processing charge",
+            "handling fee",
+            "release fee",
+            "verification payment",
             "transfer funds",
             "safe account",
             "investment",
@@ -110,6 +126,11 @@ class Config:
             "message now",
             "whatsapp",
             "telegram",
+            "reply y",
+            "copy the link",
+            "open safari",
+            "visit",
+            "settle now",
             "action required",
         ],
         "prize_bait": [
@@ -121,6 +142,9 @@ class Config:
             "free gift",
             "prize",
             "lucky draw",
+            "lottery",
+            "cash prize",
+            "selected",
             "giveaway",
             "voucher",
             "nric",
@@ -130,6 +154,13 @@ class Config:
             "tracking",
             "customs",
             "clearance fee",
+            "redelivery",
+            "zip code",
+            "postcode",
+            "address mismatch",
+            "address verification",
+            "sorting center",
+            "delivery notice",
             "returned to sender",
             "held at singapore customs",
         ],
@@ -137,7 +168,27 @@ class Config:
             "work from home",
             "easy online jobs",
             "high pay",
+            "part time",
+            "data entry",
+            "daily payout",
+            "training access",
+            "resume",
             "activation fee",
+        ],
+        "investment_scam": [
+            "guaranteed returns",
+            "daily returns",
+            "members only",
+            "crypto",
+            "arbitrage",
+            "withdrawals",
+        ],
+        "loan_scam": [
+            "loan",
+            "loan package",
+            "quick loan",
+            "low interest",
+            "loan amount",
         ],
     }
 
@@ -149,9 +200,11 @@ class Config:
     EMPTY_TEXT_PENALTY = 0.5
     MULTI_SIGNAL_BONUS = 0.08
     LINK_CREDENTIAL_BONUS = 0.1
-    TEXT_RULE_WEIGHT = 0.2
-    TEXT_MODEL_WEIGHT = 0.8
-    MODEL_POSITIVE_THRESHOLD = 0.6
+    TEXT_RULE_WEIGHT = 0.15
+    TEXT_MODEL_WEIGHT = 0.85
+    # Raw-model boundary used by the centered score normalization:
+    # 0.0 -> 0.0, boundary -> 0.5, 1.0 -> 1.0.
+    MODEL_POSITIVE_THRESHOLD = 0.83
     BENIGN_CONTEXT_HIT_WEIGHT = 0.12
     BENIGN_CONTEXT_MAX_PENALTY = 0.45
     BENIGN_MODEL_PENALTY_MULTIPLIER = 0.9
@@ -166,19 +219,28 @@ class Config:
         "singpass", "iras", "cpf", "limited", "action required", "official notice",
         "parcel", "tracking", "customs", "clearance fee", "returned to sender",
         "giveaway", "voucher", "nric", "initial deposit", "investment",
-        "work from home", "activation fee", "safe account", "money laundering",
+        "work from home", "activation fee", "processing fee", "processing charge",
+        "handling fee", "release fee", "verification payment", "security code",
+        "one time code", "passcode", "address verification", "address mismatch",
+        "zip code", "postcode", "delivery notice", "redelivery", "data entry",
+        "part time", "daily payout", "training access", "guaranteed returns",
+        "daily returns", "crypto", "arbitrage", "loan", "loan package",
+        "quick loan", "low interest", "safe account", "money laundering",
         "telegram", "t.me",
     )
     TEXT_RELEVANCE_WEAK_SIGNALS = (
         "call", "message", "now", "today", "immediately", "security", "alert",
         "notice", "government", "profile", "transaction", "money", "cash",
-        "deposit", "sponsored", "salary", "recruitment", "register",
+        "deposit", "sponsored", "salary", "recruitment", "register", "selected",
+        "resume", "delivery", "support", "expires", "reactivate",
     )
     PHONE_RISK_CONTEXT_SIGNALS = (
         "call now", "contact us", "whatsapp", "telegram", "verify", "verification",
         "otp", "password", "login", "sign in", "bank", "payment", "transfer",
         "refund", "claim", "reward", "prize", "delivery", "parcel", "customs",
         "support", "hotline", "click", "link", "urgent", "immediately",
+        "security code", "one time code", "processing charge", "handling fee",
+        "release fee",
     )
     PHONE_BENIGN_CONTEXT_SIGNALS = (
         "if not authorised", "do not reply", "appointment", "healthhub",
