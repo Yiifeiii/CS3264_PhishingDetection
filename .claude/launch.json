@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "FastAPI Backend",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["api.main:app", "--reload", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "Expo Mobile Dev Server",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["expo", "start", "--port", "8081"],
+      "port": 8081
+    }
+  ]
+}
