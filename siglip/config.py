@@ -5,9 +5,22 @@ import torch
 
 # ===== Paths =====
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _path_from_env(env_name: str, default: Path) -> Path:
+    value = os.getenv(env_name)
+    if not value:
+        return default
+
+    path = Path(value)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path
+
+
 DATA_DIR = PROJECT_ROOT / "data"
-SIGLIP_DATA_DIR = DATA_DIR / "sglip"
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
+SIGLIP_DATA_DIR = _path_from_env("SIGLIP_DATA_DIR", DATA_DIR / "sglip")
+OUTPUT_DIR = _path_from_env("SIGLIP_OUTPUT_DIR", PROJECT_ROOT / "outputs")
 EMBED_DIR = OUTPUT_DIR / "embeddings"
 MODEL_DIR = OUTPUT_DIR / "models"
 REPORT_DIR = OUTPUT_DIR / "reports"
