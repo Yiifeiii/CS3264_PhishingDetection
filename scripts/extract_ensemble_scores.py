@@ -11,7 +11,7 @@ artifacts/ensemble/test_scores.csv
 
 Each row contains:
     filename, label (0=real 1=fake),
-    siglip_logreg_prob,
+    siglip_logreg_prob, siglip_lightgbm_prob, siglip_xgboost_prob,
     text_raw_model_score, text_preprocess_model_score,
     text_heuristic_score, text_combined_score
 """
@@ -36,6 +36,8 @@ from config import (
     VAL_EMBED_FILE,
     TEST_EMBED_FILE,
     LOGREG_MODEL_FILE,
+    LGBM_MODEL_FILE,
+    XGB_MODEL_FILE,
     SIGLIP_DATA_DIR,
 )
 
@@ -58,11 +60,7 @@ def parse_args() -> argparse.Namespace:
         default="artifacts/ensemble",
         help="Directory for output CSVs.",
     )
-    p.add_argument(
-        "--siglip-classifier",
-        default=str(LOGREG_MODEL_FILE),
-        help="Path to the trained SigLIP classifier .joblib.",
-    )
+    # Kept for backward compat but ignored — all three classifiers are loaded automatically
     p.add_argument(
         "--fast",
         action="store_true",
@@ -73,17 +71,27 @@ def parse_args() -> argparse.Namespace:
 
 # ── SigLIP score helpers ────────────────────────────────────────────
 
-def load_siglip_scores(embed_file: Path, clf_path: Path) -> dict[str, tuple[int, float]]:
-    """Return {filename: (label, phishing_prob)} from pre-extracted embeddings."""
+def load_siglip_scores(
+    embed_file: Path, clf_paths: dict[str, Path]
+) -> dict[str, dict]:
+    """Return {filename: {label, logreg_prob, lightgbm_prob, xgboost_prob}} from pre-extracted embeddings."""
     data = np.load(embed_file, allow_pickle=True)
     X, y, paths = data["X"], data["y"], data["paths"]
-    clf = joblib.load(clf_path)
-    probs = clf.predict_proba(X)[:, 1]
 
-    result: dict[str, tuple[int, float]] = {}
-    for path_str, label, prob in zip(paths, y, probs):
+    # Load all classifiers and compute probabilities
+    all_probs: dict[str, np.ndarray] = {}
+    for name, clf_path in clf_paths.items():
+        if clf_path.exists():
+            clf = joblib.load(clf_path)
+            all_probs[name] = clf.predict_proba(X)[:, 1]
+
+    result: dict[str, dict] = {}
+    for i, (path_str, label) in enumerate(zip(paths, y)):
         fname = Path(str(path_str)).name
-        result[fname] = (int(label), float(prob))
+        entry: dict = {"label": int(label)}
+        for name, probs in all_probs.items():
+            entry[f"siglip_{name}_prob"] = float(probs[i])
+        result[fname] = entry
     return result
 
 
@@ -178,7 +186,7 @@ def build_split(
     split_name: str,
     embed_file: Path,
     data_dir: Path,
-    clf_path: Path,
+    clf_paths: dict[str, Path],
     ocr: OCRService,
     processor: OCRTextProcessor,
     analyzer: TextRiskAnalyzer,
@@ -186,8 +194,8 @@ def build_split(
 ) -> list[dict]:
     print(f"\n=== Processing {split_name} split ===")
 
-    # SigLIP scores
-    siglip = load_siglip_scores(embed_file, clf_path)
+    # SigLIP scores (logreg, lightgbm, xgboost)
+    siglip = load_siglip_scores(embed_file, clf_paths)
     print(f"  SigLIP: {len(siglip)} images from embeddings")
 
     # Text scores
@@ -207,16 +215,19 @@ def build_split(
             continue  # skip images not in both pipelines
 
         matched += 1
-        label = sig[0]  # both should agree; use SigLIP label
-        rows.append({
+        label = sig["label"]
+        row = {
             "filename": fname,
             "label": label,
-            "siglip_logreg_prob": round(sig[1], 6),
+            "siglip_logreg_prob": _round_or_na(sig.get("siglip_logreg_prob")),
+            "siglip_lightgbm_prob": _round_or_na(sig.get("siglip_lightgbm_prob")),
+            "siglip_xgboost_prob": _round_or_na(sig.get("siglip_xgboost_prob")),
             "text_raw_model_score": _round_or_na(txt["text_raw_model_score"]),
             "text_preprocess_model_score": _round_or_na(txt["text_preprocess_model_score"]),
             "text_heuristic_score": _round_or_na(txt["text_heuristic_score"]),
             "text_combined_score": _round_or_na(txt["text_combined_score"]),
-        })
+        }
+        rows.append(row)
 
     print(f"  Matched: {matched} images in both pipelines")
     skipped = len(all_fnames) - matched
@@ -244,10 +255,16 @@ def main() -> int:
     processor = OCRTextProcessor(cfg)
     analyzer = TextRiskAnalyzer(cfg)
 
-    clf_path = Path(args.siglip_classifier)
-    if not clf_path.exists():
-        print(f"ERROR: SigLIP classifier not found at {clf_path}")
+    clf_paths = {
+        "logreg": LOGREG_MODEL_FILE,
+        "lightgbm": LGBM_MODEL_FILE,
+        "xgboost": XGB_MODEL_FILE,
+    }
+    found = {k: v for k, v in clf_paths.items() if v.exists()}
+    if not found:
+        print("ERROR: No SigLIP classifiers found in outputs/models/")
         return 1
+    print(f"SigLIP classifiers: {list(found.keys())}")
 
     for split_name, embed_file, data_subdir in [
         ("val", VAL_EMBED_FILE, SIGLIP_DATA_DIR / "val"),
@@ -256,7 +273,7 @@ def main() -> int:
         if not embed_file.exists():
             print(f"WARNING: {embed_file} not found, skipping {split_name}")
             continue
-        rows = build_split(split_name, embed_file, data_subdir, clf_path, ocr, processor, analyzer, fast=args.fast)
+        rows = build_split(split_name, embed_file, data_subdir, found, ocr, processor, analyzer, fast=args.fast)
         out_path = output_dir / f"{split_name}_scores.csv"
         write_csv(out_path, rows)
         print(f"  Saved: {out_path} ({len(rows)} rows)")
