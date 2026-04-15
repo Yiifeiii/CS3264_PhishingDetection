@@ -79,6 +79,100 @@ class OCRService:
             return ""
         return max(candidates, key=self._text_quality_score)
 
+    def detect_text_regions(
+        self,
+        image_path: str,
+        min_confidence: float = 0.0,
+        include_processed: bool = True,
+    ):
+        if self.reader is None:
+            return []
+
+        regions = []
+
+        try:
+            original_image = self._load_image_rgb(image_path)
+        except Exception:
+            return []
+
+        original_results = self.reader.readtext(np.array(original_image), detail=1)
+        regions.extend(
+            self._results_to_regions(
+                original_results,
+                scale_x=1.0,
+                scale_y=1.0,
+                source="original",
+                min_confidence=min_confidence,
+            )
+        )
+
+        if include_processed:
+            processed_image = self._preprocess_for_ocr(original_image)
+            processed_height, processed_width = processed_image.shape[:2]
+            processed_results = self.reader.readtext(processed_image, detail=1)
+            regions.extend(
+                self._results_to_regions(
+                    processed_results,
+                    scale_x=processed_width / max(original_image.width, 1),
+                    scale_y=processed_height / max(original_image.height, 1),
+                    source="processed",
+                    min_confidence=min_confidence,
+                )
+            )
+
+        return regions
+
+    def _results_to_regions(self, results, scale_x: float, scale_y: float, source: str, min_confidence: float):
+        regions = []
+        for result in results:
+            if not isinstance(result, (list, tuple)) or len(result) < 3:
+                continue
+
+            polygon, text, confidence = result[:3]
+            text = str(text or "").strip()
+            confidence = float(confidence or 0.0)
+            if not text or confidence < min_confidence:
+                continue
+
+            bbox = self._polygon_to_bbox(polygon, scale_x=scale_x, scale_y=scale_y)
+            width = max(bbox["x2"] - bbox["x1"], 0)
+            height = max(bbox["y2"] - bbox["y1"], 0)
+            if width == 0 or height == 0:
+                continue
+
+            regions.append(
+                {
+                    "bbox": [bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]],
+                    "text": text,
+                    "confidence": confidence,
+                    "source": source,
+                    "width": width,
+                    "height": height,
+                    "area": width * height,
+                }
+            )
+
+        return regions
+
+    def _polygon_to_bbox(self, polygon, scale_x: float, scale_y: float):
+        xs = []
+        ys = []
+        for point in polygon:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            xs.append(float(point[0]) / max(scale_x, 1e-8))
+            ys.append(float(point[1]) / max(scale_y, 1e-8))
+
+        if not xs or not ys:
+            return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+
+        return {
+            "x1": int(round(min(xs))),
+            "y1": int(round(min(ys))),
+            "x2": int(round(max(xs))),
+            "y2": int(round(max(ys))),
+        }
+
     def _text_quality_score(self, text: str) -> tuple:
         normalized = text.strip()
         alnum_count = sum(char.isalnum() for char in normalized)
