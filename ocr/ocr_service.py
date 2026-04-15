@@ -25,15 +25,59 @@ class OCRService:
             else:
                 self.reader = None
 
-    def extract_text(self, image_path: str) -> str:
+    def extract_text(self, image_path: str, skip_preprocess: bool = False) -> str:
         if self.reader is None:
             return ""
 
-        original_text = self._join_results(self.reader.readtext(image_path, detail=0))
-        processed_image = self._preprocess_for_ocr(image_path)
-        processed_text = self._join_results(self.reader.readtext(processed_image, detail=0))
+        try:
+            original_image = self._load_image_rgb(image_path)
+        except Exception:
+            return ""
+
+        original_text = self._safe_readtext(np.array(original_image))
+
+        if skip_preprocess:
+            return original_text.strip()
+
+        processed_image = self._preprocess_for_ocr(original_image)
+        processed_text = self._safe_readtext(processed_image)
 
         return self._pick_best_text(original_text, processed_text)
+
+    def _load_image_rgb(self, image_path: str):
+        return Image.open(image_path).convert("RGB")
+
+    def _preprocess_for_ocr(self, image):
+        if not isinstance(image, Image.Image):
+            image = self._load_image_rgb(image)
+
+        # Upscale small screenshot text so the OCR recognizer gets clearer glyphs.
+        width, height = image.size
+        image = image.resize((max(width * 2, 1), max(height * 2, 1)), Image.Resampling.LANCZOS)
+
+        grayscale = ImageOps.grayscale(image)
+        grayscale = ImageOps.autocontrast(grayscale)
+        grayscale = ImageEnhance.Contrast(grayscale).enhance(1.8)
+        grayscale = ImageEnhance.Sharpness(grayscale).enhance(2.2)
+        grayscale = grayscale.filter(ImageFilter.MedianFilter(size=3))
+
+        return np.array(grayscale)
+
+    def _safe_readtext(self, image) -> str:
+        try:
+            return self._join_results(self.reader.readtext(image, detail=0))
+        except Exception:
+            return ""
+
+    def _join_results(self, results) -> str:
+        return " ".join(str(item).strip() for item in results if str(item).strip())
+
+    def _pick_best_text(self, original_text: str, processed_text: str) -> str:
+        candidates = [original_text.strip(), processed_text.strip()]
+        candidates = [text for text in candidates if text]
+        if not candidates:
+            return ""
+        return max(candidates, key=self._text_quality_score)
 
     def detect_text_regions(
         self,
@@ -46,7 +90,12 @@ class OCRService:
 
         regions = []
 
-        original_results = self.reader.readtext(image_path, detail=1)
+        try:
+            original_image = self._load_image_rgb(image_path)
+        except Exception:
+            return []
+
+        original_results = self.reader.readtext(np.array(original_image), detail=1)
         regions.extend(
             self._results_to_regions(
                 original_results,
@@ -58,60 +107,20 @@ class OCRService:
         )
 
         if include_processed:
-            processed_image, preprocess_meta = self._preprocess_for_ocr(
-                image_path,
-                return_metadata=True,
-            )
+            processed_image = self._preprocess_for_ocr(original_image)
+            processed_height, processed_width = processed_image.shape[:2]
             processed_results = self.reader.readtext(processed_image, detail=1)
             regions.extend(
                 self._results_to_regions(
                     processed_results,
-                    scale_x=preprocess_meta["scale_x"],
-                    scale_y=preprocess_meta["scale_y"],
+                    scale_x=processed_width / max(original_image.width, 1),
+                    scale_y=processed_height / max(original_image.height, 1),
                     source="processed",
                     min_confidence=min_confidence,
                 )
             )
 
         return regions
-
-    def _preprocess_for_ocr(self, image_path: str, return_metadata: bool = False):
-        image = Image.open(image_path).convert("RGB")
-
-        # Upscale small screenshot text so the OCR recognizer gets clearer glyphs.
-        width, height = image.size
-        resized_width = max(width * 2, 1)
-        resized_height = max(height * 2, 1)
-        image = image.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
-
-        grayscale = ImageOps.grayscale(image)
-        grayscale = ImageOps.autocontrast(grayscale)
-        grayscale = ImageEnhance.Contrast(grayscale).enhance(1.8)
-        grayscale = ImageEnhance.Sharpness(grayscale).enhance(2.2)
-        grayscale = grayscale.filter(ImageFilter.MedianFilter(size=3))
-
-        processed = np.array(grayscale)
-        if not return_metadata:
-            return processed
-
-        return processed, {
-            "original_width": width,
-            "original_height": height,
-            "processed_width": resized_width,
-            "processed_height": resized_height,
-            "scale_x": resized_width / max(width, 1),
-            "scale_y": resized_height / max(height, 1),
-        }
-
-    def _join_results(self, results) -> str:
-        return " ".join(str(item).strip() for item in results if str(item).strip())
-
-    def _pick_best_text(self, original_text: str, processed_text: str) -> str:
-        candidates = [original_text.strip(), processed_text.strip()]
-        candidates = [text for text in candidates if text]
-        if not candidates:
-            return ""
-        return max(candidates, key=self._text_quality_score)
 
     def _results_to_regions(self, results, scale_x: float, scale_y: float, source: str, min_confidence: float):
         regions = []
