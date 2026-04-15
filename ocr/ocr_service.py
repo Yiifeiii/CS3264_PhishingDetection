@@ -35,12 +35,54 @@ class OCRService:
 
         return self._pick_best_text(original_text, processed_text)
 
-    def _preprocess_for_ocr(self, image_path: str):
+    def detect_text_regions(
+        self,
+        image_path: str,
+        min_confidence: float = 0.0,
+        include_processed: bool = True,
+    ):
+        if self.reader is None:
+            return []
+
+        regions = []
+
+        original_results = self.reader.readtext(image_path, detail=1)
+        regions.extend(
+            self._results_to_regions(
+                original_results,
+                scale_x=1.0,
+                scale_y=1.0,
+                source="original",
+                min_confidence=min_confidence,
+            )
+        )
+
+        if include_processed:
+            processed_image, preprocess_meta = self._preprocess_for_ocr(
+                image_path,
+                return_metadata=True,
+            )
+            processed_results = self.reader.readtext(processed_image, detail=1)
+            regions.extend(
+                self._results_to_regions(
+                    processed_results,
+                    scale_x=preprocess_meta["scale_x"],
+                    scale_y=preprocess_meta["scale_y"],
+                    source="processed",
+                    min_confidence=min_confidence,
+                )
+            )
+
+        return regions
+
+    def _preprocess_for_ocr(self, image_path: str, return_metadata: bool = False):
         image = Image.open(image_path).convert("RGB")
 
         # Upscale small screenshot text so the OCR recognizer gets clearer glyphs.
         width, height = image.size
-        image = image.resize((max(width * 2, 1), max(height * 2, 1)), Image.Resampling.LANCZOS)
+        resized_width = max(width * 2, 1)
+        resized_height = max(height * 2, 1)
+        image = image.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
 
         grayscale = ImageOps.grayscale(image)
         grayscale = ImageOps.autocontrast(grayscale)
@@ -48,7 +90,18 @@ class OCRService:
         grayscale = ImageEnhance.Sharpness(grayscale).enhance(2.2)
         grayscale = grayscale.filter(ImageFilter.MedianFilter(size=3))
 
-        return np.array(grayscale)
+        processed = np.array(grayscale)
+        if not return_metadata:
+            return processed
+
+        return processed, {
+            "original_width": width,
+            "original_height": height,
+            "processed_width": resized_width,
+            "processed_height": resized_height,
+            "scale_x": resized_width / max(width, 1),
+            "scale_y": resized_height / max(height, 1),
+        }
 
     def _join_results(self, results) -> str:
         return " ".join(str(item).strip() for item in results if str(item).strip())
@@ -59,6 +112,57 @@ class OCRService:
         if not candidates:
             return ""
         return max(candidates, key=self._text_quality_score)
+
+    def _results_to_regions(self, results, scale_x: float, scale_y: float, source: str, min_confidence: float):
+        regions = []
+        for result in results:
+            if not isinstance(result, (list, tuple)) or len(result) < 3:
+                continue
+
+            polygon, text, confidence = result[:3]
+            text = str(text or "").strip()
+            confidence = float(confidence or 0.0)
+            if not text or confidence < min_confidence:
+                continue
+
+            bbox = self._polygon_to_bbox(polygon, scale_x=scale_x, scale_y=scale_y)
+            width = max(bbox["x2"] - bbox["x1"], 0)
+            height = max(bbox["y2"] - bbox["y1"], 0)
+            if width == 0 or height == 0:
+                continue
+
+            regions.append(
+                {
+                    "bbox": [bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]],
+                    "text": text,
+                    "confidence": confidence,
+                    "source": source,
+                    "width": width,
+                    "height": height,
+                    "area": width * height,
+                }
+            )
+
+        return regions
+
+    def _polygon_to_bbox(self, polygon, scale_x: float, scale_y: float):
+        xs = []
+        ys = []
+        for point in polygon:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            xs.append(float(point[0]) / max(scale_x, 1e-8))
+            ys.append(float(point[1]) / max(scale_y, 1e-8))
+
+        if not xs or not ys:
+            return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+
+        return {
+            "x1": int(round(min(xs))),
+            "y1": int(round(min(ys))),
+            "x2": int(round(max(xs))),
+            "y2": int(round(max(ys))),
+        }
 
     def _text_quality_score(self, text: str) -> tuple:
         normalized = text.strip()
