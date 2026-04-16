@@ -179,9 +179,9 @@ class OCRService:
         if self.backend == "transformers":
             return self._extract_text_transformers(image_path)
 
-        return self._extract_text_easyocr(image_path)
+        return self._extract_text_easyocr(image_path, skip_preprocess=skip_preprocess)
 
-    def _extract_text_easyocr(self, image_path: str) -> str:
+    def _extract_text_easyocr(self, image_path: str, *, skip_preprocess: bool = False) -> str:
         if self.reader is None:
             return ""
 
