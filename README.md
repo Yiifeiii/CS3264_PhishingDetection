@@ -26,10 +26,37 @@ pip install -r requirements.txt
 python app.py
 ```
 
+Or choose the OCR backend at runtime:
+
+```bash
+python app.py --ocr-backend easyocr
+python app.py --ocr-backend ollama --ollama-model llama3.2-vision
+python app.py --ocr-backend transformers --transformers-model florence-community/Florence-2-base-ft
+```
+
+Recommended Ollama replacement:
+- `transformers` backend with `florence-community/Florence-2-base-ft`
+- This runs a local vision transformer directly through Hugging Face `transformers`, so the OCR pipeline stays swappable without requiring an Ollama server.
+
+To run just the OCR + text phishing pipeline on one image:
+
+```bash
+python scripts/run_text_model.py --image data/raw/image4.jpg --ocr-backend transformers --transformers-model florence-community/Florence-2-base-ft
+python scripts/run_text_model.py --image data/raw/image4.jpg --ocr-backend easyocr --easyocr-use-grounding-dino
+```
+
+To evaluate the full multimodal pipeline on the labeled test split:
+
+```bash
+python scripts/evaluate_full_pipeline_accuracy.py
+python scripts/evaluate_full_pipeline_accuracy.py --ocr-backend easyocr --easyocr-use-grounding-dino
+python scripts/evaluate_full_pipeline_accuracy.py --ocr-backend easyocr --easyocr-use-grounding-dino --decision-mode score --auto-threshold-on-val
+```
+
 This will:
 - Load the deepfake detection model
 - Run inference on sample images
-- Extract text using OCR
+- Extract text using the selected OCR backend
 - Analyze OCR text with a screenshot-aware phishing pipeline
 - Fuse image and text signals into a final phishing risk score
 
@@ -53,10 +80,12 @@ The project uses a multimodal phishing pipeline:
 - Fusion: weighted combination into a low, medium, or high phishing risk score
 
 Current text defaults in `utils/config.py`:
-- `TEXT_RULE_WEIGHT = 0.2`
-- `TEXT_MODEL_WEIGHT = 0.8`
+- `OCR_BACKEND = "easyocr"`
+- `OCR_TRANSFORMERS_MODEL = "florence-community/Florence-2-base-ft"`
+- `TEXT_RULE_WEIGHT = 0.15`
+- `TEXT_MODEL_WEIGHT = 0.85`
 - `MEDIUM_RISK_THRESHOLD = 0.75`
-- `MODEL_POSITIVE_THRESHOLD = 0.6`
+- `MODEL_POSITIVE_THRESHOLD = 0.83`
 - `MASK_TRUSTED_CONTACTS_FOR_MODEL = True`
 - `MASK_ALL_PHONE_NUMBERS_FOR_MODEL = True`
 
@@ -125,28 +154,34 @@ The seeded defaults now include a small Singapore-government allowlist based on 
 
 ```mermaid
 flowchart TD
-    A[Input image] --> B[OCR preprocessing]
-    B --> C[EasyOCR on original and enhanced image]
-    C --> D[Pick better OCR text]
-    D --> E[OCR text preprocessing]
-    E --> F{Chinese policy}
-    F -->|strip| G[Remove Chinese chars]
-    F -->|skip| H[Skip text]
-    F -->|translate| I[Translate to English]
-    F -->|route| J[Preserve Chinese for model routing]
-    G --> K[OCR token cleanup]
-    I --> K
-    J --> K
-    K --> L[Chunk relevance scoring and OCR URL repair]
-    L --> M[Keep useful scam-related chunks]
-    M --> N[Rule heuristics on original filtered text]
-    M --> O[Mask trusted contacts and phone numbers for model]
-    O --> P[English DistilBERT or Chinese model]
-    N --> Q[Combined text risk]
-    P --> Q
-    Q --> R[Fuse with image model score]
-    H --> R
+    A[Input image] --> B{OCR backend}
+    B -->|easyocr| C[EasyOCR on original and enhanced image]
+    B -->|ollama| D[Ollama vision OCR on original image]
+    B -->|transformers| D2[Florence-2 OCR on original image]
+    C --> E[Pick better OCR text]
+    D --> E
+    D2 --> E
+    E --> F[OCR text preprocessing]
+    F --> G{Chinese policy}
+    G -->|strip| H[Remove Chinese chars]
+    G -->|skip| I[Skip text]
+    G -->|translate| J[Translate to English]
+    G -->|route| K[Preserve Chinese for model routing]
+    H --> L[OCR token cleanup]
+    J --> L
+    K --> L
+    L --> M[Chunk relevance scoring and OCR URL repair]
+    M --> N[Keep useful scam-related chunks]
+    N --> O[Rule heuristics on original filtered text]
+    N --> P[Mask trusted contacts and phone numbers for model]
+    P --> Q[English DistilBERT or Chinese model]
+    O --> R[Combined text risk]
+    Q --> R
+    R --> S[Fuse with image model score]
+    I --> S
 ```
+
+`--ocr-backend` is also available in `scripts/train_distilbert_pipeline.py`, `scripts/run_text_ablation_suite.py`, and `scripts/evaluate_distilbert_accuracy.py`.
 
 ## Evaluate text accuracy
 
@@ -154,6 +189,8 @@ To evaluate the text pipeline on labeled phishing vs non-phishing folders:
 
 ```bash
 python scripts/evaluate_distilbert_accuracy.py --chinese-policy route
+python scripts/evaluate_distilbert_accuracy.py --chinese-policy route --ocr-backend ollama --ollama-model llama3.2-vision
+python scripts/evaluate_distilbert_accuracy.py --chinese-policy route --ocr-backend transformers --transformers-model florence-community/Florence-2-base-ft
 ```
 
 Useful options:

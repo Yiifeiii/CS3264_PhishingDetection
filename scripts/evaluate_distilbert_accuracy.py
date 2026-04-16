@@ -10,13 +10,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
 
-from ocr.ocr_service import OCRService
 from utils.config import Config
 from utils.ocr_text_processor import OCRTextProcessor
+from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
 from utils.text_risk_analyzer import TextRiskAnalyzer
 
 
 def parse_args() -> argparse.Namespace:
+    cfg = Config()
     parser = argparse.ArgumentParser(
         description="Evaluate OCR + bilingual phishing-text accuracy on labeled image folders."
     )
@@ -87,6 +88,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print all images that were included in the accuracy calculation.",
     )
+    add_ocr_runtime_args(parser, cfg, default_timeout_seconds=150)
     return parser.parse_args()
 
 
@@ -188,7 +190,7 @@ def main() -> int:
     if not phishing_files or not non_phishing_files:
         raise ValueError("Both directories must contain at least one supported image.")
 
-    ocr = OCRService(list(cfg.OCR_LANGUAGES), gpu=(cfg.DEVICE == "cuda"))
+    ocr = build_ocr_service(cfg, args)
     processor = OCRTextProcessor(cfg)
     analyzer = TextRiskAnalyzer(cfg)
 
@@ -259,7 +261,12 @@ def main() -> int:
         )
 
     if not scored_records:
-        raise ValueError("No images with OCR text were found to evaluate.")
+        raise ValueError(
+            "No images with OCR text were found to evaluate. "
+            f"OCR backend={args.ocr_backend}. "
+            f"OCR load warning={ocr.load_error!r}. "
+            f"Skipped images={len(skipped_no_text)}."
+        )
 
     if args.auto_threshold and args.threshold is not None:
         raise ValueError("Use either --threshold or --auto-threshold, not both.")
@@ -291,6 +298,9 @@ def main() -> int:
     print(f"Routed Chinese texts: {routed_count}")
     print(f"OCR active languages: {ocr.active_languages}")
     print(f"OCR load warning: {ocr.load_error}")
+    print(f"OCR backend: {args.ocr_backend}")
+    for label, value in ocr.runtime_details().items():
+        print(f"{label}: {value}")
     print(f"Decision source: {args.decision_source}")
     print(f"Threshold: {threshold:.2f}")
     print(f"Threshold source: {threshold_source}")

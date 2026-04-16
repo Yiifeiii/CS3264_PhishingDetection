@@ -19,6 +19,23 @@ class Config:
     RAW_IMAGE_DIR = "data/raw"
     SUPPORTED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".avif")
     OCR_LANGUAGES = ("en", "ch_sim")
+    OCR_BACKEND = "easyocr"
+    OCR_OLLAMA_MODEL = "llama3.2-vision"
+    OCR_OLLAMA_HOST = "http://localhost:11434"
+    OCR_OLLAMA_TIMEOUT_SECONDS = 150
+    OCR_OLLAMA_CLEAN_OUTPUT = True
+    OCR_TRANSFORMERS_MODEL = "florence-community/Florence-2-base-ft"
+    OCR_TRANSFORMERS_TASK_PROMPT = "<OCR>"
+    OCR_TRANSFORMERS_MAX_NEW_TOKENS = 1024
+    OCR_TRANSFORMERS_NUM_BEAMS = 3
+    OCR_TRANSFORMERS_CLEAN_OUTPUT = True
+    OCR_EASYOCR_USE_GROUNDING_DINO = False
+    OCR_EASYOCR_GROUNDING_DINO_MODEL = "IDEA-Research/grounding-dino-tiny"
+    OCR_EASYOCR_GROUNDING_DINO_PROMPT = "text. paragraph. text block. message. chat bubble. dialog."
+    OCR_EASYOCR_GROUNDING_BOX_THRESHOLD = 0.25
+    OCR_EASYOCR_GROUNDING_TEXT_THRESHOLD = 0.25
+    OCR_EASYOCR_GROUNDING_MAX_REGIONS = 6
+    OCR_EASYOCR_GROUNDING_PADDING_RATIO = 0.03
     OCR_CHINESE_POLICY = "route"  # valid options: "strip", "skip", "translate", "route"
 
     # Allowlisted contacts suppress email/phone phishing heuristics but do not

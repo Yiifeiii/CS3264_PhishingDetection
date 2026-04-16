@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from ocr.ocr_service import OCRService
 from utils.config import Config
 from utils.ocr_text_processor import OCRTextProcessor
+from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
 from utils.text_risk_analyzer import TextRiskAnalyzer
 
 
@@ -169,6 +170,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional max number of files to evaluate per class for quick smoke tests.",
     )
+    add_ocr_runtime_args(parser, Config())
     return parser.parse_args()
 
 
@@ -530,8 +532,11 @@ def main() -> int:
 
     cfg = Config()
     cfg.OCR_CHINESE_POLICY = args.chinese_policy
-    ocr = OCRService(list(cfg.OCR_LANGUAGES), gpu=(cfg.DEVICE == "cuda"))
+    ocr = build_ocr_service(cfg, args)
     processor = OCRTextProcessor(cfg)
+    print(f"OCR backend: {args.ocr_backend}")
+    for label, value in ocr.runtime_details().items():
+        print(f"{label}: {value}")
 
     val_rows = build_dataset_rows(
         split_name="val",
@@ -684,6 +689,7 @@ def main() -> int:
         {
             "objective": args.objective,
             "chinese_policy": args.chinese_policy,
+            "ocr_backend": args.ocr_backend,
             "val_counts": {
                 "total_images": len(val_rows),
                 "usable_processed_rows": sum(1 for row in val_rows if str(row["processed_text"]).strip()),
