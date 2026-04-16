@@ -7,8 +7,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
@@ -17,6 +18,9 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, TensorDataset
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +32,7 @@ for path in (PROJECT_ROOT, SIGLIP_ROOT, SCRIPTS_ROOT):
 
 from hf_utils import load_siglip_processor_and_model  # noqa: E402
 from feature_utils import get_normalized_image_features  # noqa: E402
+from classifier_utils import build_classifier, predict_positive_scores  # noqa: E402
 from ocr.ocr_service import OCRService  # noqa: E402
 from run_siglip_grounding_dino_crop_stream import (  # noqa: E402
     DEFAULT_PROMPT_LABELS,
@@ -39,6 +44,19 @@ from run_siglip_ocr_crop_stream import generate_crop_candidates, safe_slug  # no
 
 
 CLASS_NAME_TO_ID = {"real": 0, "fake": 1}
+CLASSIFIER_NAME_ALIASES = {
+    "lr": "logreg",
+    "logreg": "logreg",
+    "lightgbm": "lightgbm",
+    "xgboost": "xgboost",
+    "contrastive": "contrastive",
+}
+CLASSIFIER_DISPLAY_NAMES = {
+    "logreg": "Logistic Regression",
+    "lightgbm": "LightGBM",
+    "xgboost": "XGBoost",
+    "contrastive": "Contrastive Projection",
+}
 PRIORITY_TOKEN_WEIGHTS = {
     "telegram": 6.0,
     "whatsapp": 6.0,
@@ -103,6 +121,19 @@ def detect_device(device: str = "auto"):
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def canonicalize_classifier_name(model_name: str):
+    canonical = CLASSIFIER_NAME_ALIASES.get(str(model_name).strip().lower())
+    if canonical is None:
+        valid = ", ".join(sorted(CLASSIFIER_NAME_ALIASES))
+        raise ValueError(f"Unsupported classifier `{model_name}`. Expected one of: {valid}")
+    return canonical
+
+
+def classifier_display_name(model_name: str):
+    canonical = canonicalize_classifier_name(model_name)
+    return CLASSIFIER_DISPLAY_NAMES[canonical]
 
 
 def tokenize_source_name(source_name: str):
@@ -340,6 +371,363 @@ def pool_crop_features(crop_features, crop_weights, pooling: str):
 
     pooled_feature = pooled_feature / max(np.linalg.norm(pooled_feature), 1e-12)
     return pooled_feature.astype(np.float32)
+
+
+def l2_normalize_rows(X):
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    return (X / norms).astype(np.float32)
+
+
+class ProjectionHead(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, projection_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, projection_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def supervised_contrastive_loss(projections, labels, temperature: float):
+    projections = F.normalize(projections, dim=1)
+    logits = projections @ projections.T / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    batch_size = labels.shape[0]
+    self_mask = torch.eye(batch_size, device=labels.device, dtype=torch.bool)
+    positive_mask = (labels.unsqueeze(0) == labels.unsqueeze(1)) & (~self_mask)
+
+    exp_logits = torch.exp(logits) * (~self_mask)
+    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-12)
+
+    positive_count = positive_mask.sum(dim=1)
+    valid = positive_count > 0
+    if not torch.any(valid):
+        return None
+
+    loss = -(positive_mask * log_prob).sum(dim=1) / positive_count.clamp(min=1)
+    return loss[valid].mean()
+
+
+class ContrastiveProjectionClassifier:
+    def __init__(
+        self,
+        seed: int,
+        hidden_dim: int,
+        projection_dim: int,
+        epochs: int,
+        batch_size: int,
+        learning_rate: float,
+        weight_decay: float,
+        temperature: float,
+        device: str,
+        log_every: int = 0,
+        logger=None,
+    ):
+        self.seed = seed
+        self.hidden_dim = hidden_dim
+        self.projection_dim = projection_dim
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.temperature = temperature
+        self.device = detect_device(device)
+        self.log_every = log_every
+        self.logger = logger
+
+    def fit(self, X, y):
+        torch.manual_seed(self.seed)
+        np.random.seed(self.seed)
+
+        self.scaler_ = StandardScaler()
+        X_scaled = self.scaler_.fit_transform(X).astype(np.float32)
+        X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
+        y_tensor = torch.tensor(y, dtype=torch.long)
+        loader = DataLoader(
+            TensorDataset(X_tensor, y_tensor),
+            batch_size=min(self.batch_size, len(y)),
+            shuffle=True,
+            drop_last=False,
+        )
+
+        self.projector_ = ProjectionHead(
+            input_dim=X.shape[1],
+            hidden_dim=self.hidden_dim,
+            projection_dim=self.projection_dim,
+        ).to(self.device)
+        optimizer = torch.optim.AdamW(
+            self.projector_.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay,
+        )
+
+        self.training_history_ = []
+        self.projector_.train()
+        for epoch in range(1, self.epochs + 1):
+            running_loss = 0.0
+            steps = 0
+            for batch_X, batch_y in loader:
+                batch_X = batch_X.to(self.device)
+                batch_y = batch_y.to(self.device)
+                projections = self.projector_(batch_X)
+                loss = supervised_contrastive_loss(
+                    projections,
+                    batch_y,
+                    temperature=self.temperature,
+                )
+                if loss is None:
+                    continue
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                running_loss += float(loss.item())
+                steps += 1
+
+            mean_loss = running_loss / max(steps, 1)
+            self.training_history_.append({"epoch": epoch, "loss": mean_loss})
+            if self.logger and self.log_every > 0 and (epoch == 1 or epoch % self.log_every == 0 or epoch == self.epochs):
+                self.logger(f"contrastive epoch {epoch}/{self.epochs}: loss={mean_loss:.4f}")
+
+        train_projected = self.transform(X)
+        centroids = []
+        for class_id in (0, 1):
+            centroid = np.mean(train_projected[y == class_id], axis=0)
+            centroid = centroid / max(np.linalg.norm(centroid), 1e-12)
+            centroids.append(centroid)
+        self.class_centroids_ = np.stack(centroids, axis=0).astype(np.float32)
+        return self
+
+    def transform(self, X):
+        X_scaled = self.scaler_.transform(X).astype(np.float32)
+        self.projector_.eval()
+        with torch.no_grad():
+            tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
+            projected = self.projector_(tensor)
+            projected = F.normalize(projected, dim=1)
+        return projected.detach().cpu().numpy().astype(np.float32)
+
+    def predict_proba(self, X):
+        projected = self.transform(X)
+        logits = projected @ self.class_centroids_.T / self.temperature
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        exp_logits = np.exp(logits)
+        probs = exp_logits / np.maximum(np.sum(exp_logits, axis=1, keepdims=True), 1e-12)
+        return probs.astype(np.float32)
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
+class AttentionFusionEncoder(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, num_heads: int, dropout: float):
+        super().__init__()
+        self.global_proj = nn.Linear(input_dim, hidden_dim)
+        self.crop_proj = nn.Linear(input_dim, hidden_dim)
+        self.modality_embed = nn.Parameter(torch.randn(2, hidden_dim) * 0.02)
+        self.query = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+        )
+        self.post_norm = nn.LayerNorm(hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, input_dim)
+        self.classifier = nn.Linear(input_dim, 1)
+
+    def encode(self, global_x, crop_x):
+        tokens = torch.stack(
+            [
+                self.global_proj(global_x),
+                self.crop_proj(crop_x),
+            ],
+            dim=1,
+        )
+        tokens = tokens + self.modality_embed.unsqueeze(0)
+        query = self.query.expand(tokens.shape[0], -1, -1)
+        attn_out, attn_weights = self.attn(query, tokens, tokens, need_weights=True)
+        token_mean = tokens.mean(dim=1, keepdim=True)
+        fused = self.post_norm(attn_out + token_mean)
+        fused = fused + self.ffn(fused)
+        fused_embedding = self.out_proj(fused.squeeze(1))
+        fused_embedding = F.normalize(fused_embedding, dim=-1)
+        return fused_embedding, attn_weights.squeeze(1)
+
+    def forward(self, global_x, crop_x):
+        fused_embedding, attn_weights = self.encode(global_x, crop_x)
+        logits = self.classifier(fused_embedding).squeeze(-1)
+        return logits, fused_embedding, attn_weights
+
+
+def train_attention_encoder(
+    X_global,
+    X_crop,
+    y_train,
+    *,
+    seed: int,
+    val_fraction: float,
+    hidden_dim: int,
+    num_heads: int,
+    dropout: float,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    weight_decay: float,
+    patience: int,
+    device: str,
+    log_every: int = 0,
+    logger=None,
+):
+    resolved_device = detect_device(device)
+    input_dim = X_global.shape[1]
+    class_counts = np.bincount(np.asarray(y_train, dtype=np.int64), minlength=2)
+    if len(y_train) < 6 or np.min(class_counts[class_counts > 0], initial=0) < 2:
+        train_idx = np.arange(len(y_train))
+        val_idx = np.arange(len(y_train))
+    else:
+        train_idx, val_idx = train_test_split(
+            np.arange(len(y_train)),
+            test_size=val_fraction,
+            stratify=y_train,
+            random_state=seed,
+        )
+
+    Xg_subtrain = torch.tensor(X_global[train_idx], dtype=torch.float32)
+    Xc_subtrain = torch.tensor(X_crop[train_idx], dtype=torch.float32)
+    y_subtrain = torch.tensor(y_train[train_idx], dtype=torch.float32)
+    Xg_val = torch.tensor(X_global[val_idx], dtype=torch.float32)
+    Xc_val = torch.tensor(X_crop[val_idx], dtype=torch.float32)
+    y_val = y_train[val_idx]
+
+    loader = DataLoader(
+        TensorDataset(Xg_subtrain, Xc_subtrain, y_subtrain),
+        batch_size=min(batch_size, len(train_idx)),
+        shuffle=True,
+        drop_last=False,
+    )
+
+    model = AttentionFusionEncoder(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        dropout=dropout,
+    ).to(resolved_device)
+
+    positives = float(np.sum(y_train[train_idx] == 1))
+    negatives = float(np.sum(y_train[train_idx] == 0))
+    pos_weight = torch.tensor([max(negatives / max(positives, 1.0), 1.0)], dtype=torch.float32, device=resolved_device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+
+    best = None
+    bad_epochs = 0
+    history = []
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_loss = 0.0
+        train_steps = 0
+        for batch_g, batch_c, batch_y in loader:
+            batch_g = batch_g.to(resolved_device)
+            batch_c = batch_c.to(resolved_device)
+            batch_y = batch_y.to(resolved_device)
+
+            optimizer.zero_grad()
+            logits, _, _ = model(batch_g, batch_c)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            optimizer.step()
+            train_loss += float(loss.item())
+            train_steps += 1
+
+        model.eval()
+        with torch.no_grad():
+            val_logits, _, _ = model(Xg_val.to(resolved_device), Xc_val.to(resolved_device))
+            val_probs = torch.sigmoid(val_logits).detach().cpu().numpy()
+        val_preds = (val_probs >= 0.5).astype(int)
+        val_metrics = compute_metrics(y_val, val_preds, val_probs)
+        mean_train_loss = train_loss / max(train_steps, 1)
+        row = {
+            "epoch": epoch,
+            "train_loss": mean_train_loss,
+            "val_accuracy": float(val_metrics["accuracy"]),
+            "val_precision": float(val_metrics["precision"]),
+            "val_recall": float(val_metrics["recall"]),
+            "val_f1": float(val_metrics["f1"]),
+            "val_roc_auc": float(val_metrics.get("roc_auc", 0.0)),
+        }
+        history.append(row)
+
+        score_tuple = (
+            row["val_f1"],
+            row["val_roc_auc"],
+            row["val_accuracy"],
+            -epoch,
+        )
+        if best is None or score_tuple > best["score_tuple"]:
+            best = {
+                "score_tuple": score_tuple,
+                "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+                "epoch": epoch,
+                "metrics": row,
+            }
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
+
+        if logger and log_every > 0 and (epoch == 1 or epoch % log_every == 0 or epoch == epochs):
+            logger(
+                f"attention epoch {epoch}/{epochs}: "
+                f"train_loss={mean_train_loss:.4f}, "
+                f"val_f1={row['val_f1']:.4f}, "
+                f"val_auc={row['val_roc_auc']:.4f}"
+            )
+
+        if bad_epochs >= patience:
+            if logger:
+                logger(f"attention early stop at epoch {epoch}; best epoch was {best['epoch']}")
+            break
+
+    model.load_state_dict(best["state_dict"])
+    model.to(resolved_device)
+    model.eval()
+    return model, history, best, resolved_device
+
+
+def encode_attention_fusion(model, X_global, X_crop, device: str, batch_size: int):
+    model.eval()
+    fused_embeddings = []
+    attn_weights = []
+    with torch.no_grad():
+        for start in range(0, len(X_global), batch_size):
+            end = start + batch_size
+            batch_g = torch.tensor(X_global[start:end], dtype=torch.float32, device=device)
+            batch_c = torch.tensor(X_crop[start:end], dtype=torch.float32, device=device)
+            _, fused, weights = model(batch_g, batch_c)
+            fused_embeddings.append(fused.detach().cpu().numpy())
+            attn_weights.append(weights.detach().cpu().numpy())
+
+    return (
+        np.concatenate(fused_embeddings, axis=0).astype(np.float32),
+        np.concatenate(attn_weights, axis=0).astype(np.float32),
+    )
 
 
 def _normalize_label(text: str):
@@ -703,14 +1091,42 @@ def build_grounding_dino_feature_matrix(
     return np.stack(features, axis=0), crop_rows
 
 
-def train_logistic_regression(X_train, y_train):
-    clf = LogisticRegression(
-        max_iter=5000,
-        class_weight="balanced",
-        random_state=42,
-    )
+def train_classifier(
+    model_name: str,
+    X_train,
+    y_train,
+    *,
+    seed: int = 42,
+    contrastive_hidden_dim: int = 256,
+    contrastive_projection_dim: int = 128,
+    contrastive_epochs: int = 60,
+    contrastive_batch_size: int = 64,
+    contrastive_learning_rate: float = 1e-3,
+    contrastive_weight_decay: float = 1e-4,
+    contrastive_temperature: float = 0.10,
+    contrastive_device: str = "auto",
+    log_every: int = 0,
+    logger=None,
+):
+    canonical = canonicalize_classifier_name(model_name)
+    if canonical == "contrastive":
+        clf = ContrastiveProjectionClassifier(
+            seed=seed,
+            hidden_dim=contrastive_hidden_dim,
+            projection_dim=contrastive_projection_dim,
+            epochs=contrastive_epochs,
+            batch_size=contrastive_batch_size,
+            learning_rate=contrastive_learning_rate,
+            weight_decay=contrastive_weight_decay,
+            temperature=contrastive_temperature,
+            device=contrastive_device,
+            log_every=log_every,
+            logger=logger,
+        )
+    else:
+        clf = build_classifier(canonical, y_train)
     clf.fit(X_train, y_train)
-    return clf
+    return clf, canonical
 
 
 def compute_metrics(y_true, y_pred, y_prob):
@@ -727,8 +1143,12 @@ def compute_metrics(y_true, y_pred, y_prob):
 
 
 def evaluate_classifier(clf, X_test, y_test, rows):
-    y_prob = clf.predict_proba(X_test)[:, 1]
-    y_pred = (y_prob >= 0.5).astype(int)
+    y_prob = predict_positive_scores(clf, X_test)
+    if y_prob is not None:
+        y_pred = (y_prob >= 0.5).astype(int)
+    else:
+        y_pred = clf.predict(X_test)
+        y_prob = np.asarray(y_pred, dtype=np.float32)
     metrics = compute_metrics(y_test, y_pred, y_prob)
 
     prediction_rows = []
@@ -755,6 +1175,8 @@ def evaluate_classifier(clf, X_test, y_test, rows):
                 "selected_signal_bbox_x2": row.get("selected_signal_bbox_x2", ""),
                 "selected_signal_bbox_y2": row.get("selected_signal_bbox_y2", ""),
                 "selected_signal_crop_path": row.get("selected_signal_crop_path", ""),
+                "global_attention_weight": row.get("global_attention_weight", ""),
+                "crop_attention_weight": row.get("crop_attention_weight", ""),
             }
         )
     return metrics, prediction_rows
@@ -826,11 +1248,14 @@ def build_comparison(
     crop_summary,
     device: str,
     segmentation_key: str,
+    global_key: str = "global_siglip_lr",
+    fusion_metrics=None,
+    fusion_key: str | None = None,
 ):
-    return {
+    comparison = {
         "device": device,
         "split_summary": split_summary_payload,
-        "global_siglip_lr": global_metrics,
+        global_key: global_metrics,
         segmentation_key: crop_metrics,
         "segmentation_method": segmentation_key,
         "crop_summary": crop_summary,
@@ -840,3 +1265,25 @@ def build_comparison(
             crop_metrics.get("roc_auc", math.nan) - global_metrics.get("roc_auc", math.nan)
         ),
     }
+    if fusion_metrics is not None and fusion_key is not None:
+        comparison[fusion_key] = fusion_metrics
+        comparison["fusion_method"] = fusion_key
+        comparison["delta_fusion_vs_global_accuracy"] = float(
+            fusion_metrics["accuracy"] - global_metrics["accuracy"]
+        )
+        comparison["delta_fusion_vs_global_f1"] = float(
+            fusion_metrics["f1"] - global_metrics["f1"]
+        )
+        comparison["delta_fusion_vs_global_roc_auc"] = float(
+            fusion_metrics.get("roc_auc", math.nan) - global_metrics.get("roc_auc", math.nan)
+        )
+        comparison["delta_fusion_vs_crop_accuracy"] = float(
+            fusion_metrics["accuracy"] - crop_metrics["accuracy"]
+        )
+        comparison["delta_fusion_vs_crop_f1"] = float(
+            fusion_metrics["f1"] - crop_metrics["f1"]
+        )
+        comparison["delta_fusion_vs_crop_roc_auc"] = float(
+            fusion_metrics.get("roc_auc", math.nan) - crop_metrics.get("roc_auc", math.nan)
+        )
+    return comparison
