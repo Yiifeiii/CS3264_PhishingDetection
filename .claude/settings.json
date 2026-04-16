@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(npx expo:*)",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('react-native:', d.get\\('react-native', 'not found'\\)\\)\")"
-    ]
-  }
-}
