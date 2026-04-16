@@ -91,6 +91,45 @@ Current text defaults in `utils/config.py`:
 
 These values were chosen after evaluating both the original labeled set and the social screenshot set. If you change the weights, you should re-tune the threshold as well.
 
+## SigLIP embedding baseline
+
+The `siglip/` folder contains a separate baseline for screenshot scam detection:
+- Extract image embeddings with `google/siglip2-base-patch16-224`
+- Train a shallow classifier on top of the frozen embeddings
+- Compare `logreg`, `lightgbm`, and `xgboost` on the same train/val/test splits
+
+Expected dataset layout:
+
+```text
+data/sglip/
+  train/
+    real/
+    fake/
+  val/
+    real/
+    fake/
+  test/
+    real/
+    fake/
+```
+
+Commands:
+
+```bash
+python scripts/split_siglip_dataset.py
+python siglip/extract_embeddings.py
+python siglip/train_classifier.py --model logreg
+python siglip/train_classifier.py --model lightgbm
+python siglip/train_classifier.py --model xgboost
+python siglip/evaluate.py --model xgboost
+python siglip/inference.py --image path/to/screenshot.png --model xgboost
+```
+
+Notes:
+- Device auto-detects to `cuda`, `mps`, or `cpu`
+- Override device manually with `SIGLIP_DEVICE=cpu`
+- LightGBM and XGBoost require the packages from `requirements.txt`
+
 ## Text preprocessing pipeline
 
 The text pipeline is designed for noisy screenshot-style phishing images where raw OCR often includes:
