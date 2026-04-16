@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from ocr.ocr_service import OCRService
 from utils.config import Config
 from utils.ocr_text_processor import OCRTextProcessor
+from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
 from utils.text_risk_analyzer import TextRiskAnalyzer
 
 
@@ -150,6 +151,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow writing into an existing output directory.",
     )
+    add_ocr_runtime_args(parser, cfg)
     return parser.parse_args()
 
 
@@ -520,7 +522,7 @@ def main() -> int:
     cfg.OCR_CHINESE_POLICY = args.chinese_policy
     allowed_exts = {ext.lower() for ext in cfg.SUPPORTED_IMAGE_EXTENSIONS}
 
-    ocr = OCRService(list(cfg.OCR_LANGUAGES), gpu=(cfg.DEVICE == "cuda"))
+    ocr = build_ocr_service(cfg, args)
     processor = OCRTextProcessor(cfg)
     prep_analyzer = TextRiskAnalyzer(cfg, load_models=False)
 
@@ -554,6 +556,9 @@ def main() -> int:
             f"{split_name}: usable={len(split_rows[split_name])} "
             f"skipped={len(split_skipped[split_name])}"
         )
+    print(f"OCR backend: {args.ocr_backend}")
+    for label, value in ocr.runtime_details().items():
+        print(f"{label}: {value}")
 
     if not split_rows["train"] or not split_rows["val"] or not split_rows["test"]:
         raise ValueError("Train/val/test must each contain at least one usable OCR row.")
@@ -614,11 +619,23 @@ def main() -> int:
 
     suggested_config = {
         "TEXT_PHISHING_MODEL_NAME": str(model_dir),
+        "OCR_BACKEND": args.ocr_backend,
         "OCR_CHINESE_POLICY": args.chinese_policy,
         "TEXT_RULE_WEIGHT": best_combined["text_rule_weight"],
         "TEXT_MODEL_WEIGHT": best_combined["text_model_weight"],
         "MEDIUM_RISK_THRESHOLD": best_combined["threshold"],
     }
+    if args.ocr_backend == "ollama":
+        suggested_config["OCR_OLLAMA_MODEL"] = args.ollama_model
+        suggested_config["OCR_OLLAMA_HOST"] = args.ollama_host
+        suggested_config["OCR_OLLAMA_TIMEOUT_SECONDS"] = args.ollama_timeout_seconds
+        suggested_config["OCR_OLLAMA_CLEAN_OUTPUT"] = not args.ollama_disable_cleaning
+    elif args.ocr_backend == "transformers":
+        suggested_config["OCR_TRANSFORMERS_MODEL"] = args.transformers_model
+        suggested_config["OCR_TRANSFORMERS_TASK_PROMPT"] = args.transformers_task_prompt
+        suggested_config["OCR_TRANSFORMERS_MAX_NEW_TOKENS"] = args.transformers_max_new_tokens
+        suggested_config["OCR_TRANSFORMERS_NUM_BEAMS"] = args.transformers_num_beams
+        suggested_config["OCR_TRANSFORMERS_CLEAN_OUTPUT"] = not args.transformers_disable_cleaning
 
     summary = {
         "base_model": args.base_model,
@@ -626,6 +643,7 @@ def main() -> int:
         "output_dir": str(output_dir),
         "chinese_policy": args.chinese_policy,
         "objective": args.objective,
+        "ocr_backend": args.ocr_backend,
         "ocr_active_languages": ocr.active_languages,
         "ocr_load_warning": ocr.load_error,
         "trainer_best_checkpoint": trainer.state.best_model_checkpoint,
@@ -645,6 +663,17 @@ def main() -> int:
         "test_combined_metrics": test_combined["metrics"],
         "suggested_config": suggested_config,
     }
+    if args.ocr_backend == "ollama":
+        summary["ocr_ollama_model"] = args.ollama_model
+        summary["ocr_ollama_host"] = args.ollama_host
+        summary["ocr_ollama_timeout_seconds"] = args.ollama_timeout_seconds
+        summary["ocr_ollama_clean_output"] = not args.ollama_disable_cleaning
+    elif args.ocr_backend == "transformers":
+        summary["ocr_transformers_model"] = args.transformers_model
+        summary["ocr_transformers_task_prompt"] = args.transformers_task_prompt
+        summary["ocr_transformers_max_new_tokens"] = args.transformers_max_new_tokens
+        summary["ocr_transformers_num_beams"] = args.transformers_num_beams
+        summary["ocr_transformers_clean_output"] = not args.transformers_disable_cleaning
 
     write_json(output_dir / "summary.json", summary)
     write_json(output_dir / "suggested_config.json", suggested_config)

@@ -1,18 +1,31 @@
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 
 from utils.config import Config
 from models.deepfake_model import DeepfakeModel
 from preprocess.image_preprocessor import ImagePreprocessor
 from utils.inference_service import InferenceService
-from ocr.ocr_service import OCRService
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.text_risk_analyzer import TextRiskAnalyzer
 from utils.risk_fusion_service import RiskFusionService
+from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
+
+
+def parse_args() -> argparse.Namespace:
+    cfg = Config()
+    parser = argparse.ArgumentParser(
+        description="Run the phishing-detection pipeline on images in the configured raw-image directory."
+    )
+    add_ocr_runtime_args(parser, cfg)
+    return parser.parse_args()
 
 
 class App:
-    def __init__(self):
+    def __init__(self, args: argparse.Namespace | None = None):
         self.cfg = Config()
+        self.args = args or argparse.Namespace()
 
         self.model = DeepfakeModel(
             self.cfg.DEEPFAKE_MODEL_NAME,
@@ -21,7 +34,7 @@ class App:
 
         self.infer = InferenceService(self.model)
         self.preprocessor = ImagePreprocessor()
-        self.ocr = OCRService(list(self.cfg.OCR_LANGUAGES), gpu=(self.cfg.DEVICE == "cuda"))
+        self.ocr = build_ocr_service(self.cfg, self.args)
         self.ocr_text_processor = OCRTextProcessor(self.cfg)
         self.text_analyzer = TextRiskAnalyzer(self.cfg)
         self.risk_fusion = RiskFusionService(self.cfg)
@@ -40,8 +53,11 @@ class App:
         fused_result = self.risk_fusion.combine(image_result, text_result)
 
         print(f"\nImage: {path}")
+        print("OCR Backend:", self.ocr.backend)
         print("OCR Languages:", self.ocr.active_languages)
         print("OCR Load Warning:", self.ocr.load_error)
+        for label, value in self.ocr.runtime_details().items():
+            print(f"{label}:", value)
         print("Chinese Policy:", self.cfg.OCR_CHINESE_POLICY)
         print("English Text Model Loaded:", self.text_analyzer.model.is_loaded)
         print("Chinese Text Model Loaded:", bool(self.text_analyzer.chinese_model and self.text_analyzer.chinese_model.is_loaded))
@@ -71,6 +87,11 @@ class App:
             self.run_single(path)
 
 
-if __name__ == "__main__":
-    app = App()
+def main() -> int:
+    app = App(parse_args())
     app.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
