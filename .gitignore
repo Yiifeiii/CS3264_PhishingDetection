@@ -32,3 +32,6 @@ data/
 artifacts/
 models/text_phishing_base/
 models/text_phishing_distilbert_ft/
+
+outputs/
+external/
