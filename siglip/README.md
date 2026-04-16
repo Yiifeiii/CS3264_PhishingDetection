@@ -89,6 +89,101 @@ Evaluate all classifiers on the test set:
 ./venv/bin/python siglip/evaluate.py --model all
 ```
 
+## Concatenated Global + Crop Fusion
+
+If you already have one set of global-image SigLIP embeddings and one set of crop-image
+SigLIP embeddings for the same train/val/test splits, you can concatenate them and train
+the same shallow classifier heads on the fused representation.
+
+The fusion script aligns samples by image path before concatenation, so the global and
+crop `.npz` files must describe the same images within each split.
+
+Example:
+
+```bash
+./venv/bin/python scripts/run_siglip_concat_fusion.py \
+  --global-train outputs/global/embeddings/train_embeddings.npz \
+  --crop-train outputs/crop/embeddings/train_embeddings.npz \
+  --global-val outputs/global/embeddings/val_embeddings.npz \
+  --crop-val outputs/crop/embeddings/val_embeddings.npz \
+  --global-test outputs/global/embeddings/test_embeddings.npz \
+  --crop-test outputs/crop/embeddings/test_embeddings.npz \
+  --output-root outputs/siglip_concat_fusion \
+  --model all \
+  --l2-normalize-concat
+```
+
+Outputs:
+
+- fused embeddings under `outputs/siglip_concat_fusion/embeddings/`
+- trained models under `outputs/siglip_concat_fusion/models/`
+- validation/test reports under `outputs/siglip_concat_fusion/reports/`
+- run summary in `outputs/siglip_concat_fusion/summary.json`
+
+## Fixed Holdout With GroundingDINO Crops + Concat Fusion
+
+For the `chat` + `social` custom datasets, there is a single runner that:
+
+- creates one fixed final test holdout
+- extracts full-image SigLIP embeddings
+- extracts GroundingDINO crop proposals, saves every crop, and pools crop embeddings per image
+- uses source-aware GroundingDINO prompts:
+  - `chat`: message bubble / text-message style regions
+  - `social`: post / caption / logo / face style regions
+- concatenates the global and crop embeddings
+- trains all classifier heads (`logreg`, `lightgbm`, `xgboost`)
+- evaluates `global`, `crop-only`, and `fusion` on the same untouched test split
+
+Example:
+
+```bash
+./venv/bin/python scripts/run_siglip_grounding_dino_fusion_holdout.py \
+  --source-root data/chat \
+  --source-root data/social \
+  --test-total 80 \
+  --output-root outputs/chat_social_grounding_dino_fusion \
+  --model-name artifacts/siglip2-base-patch16-224 \
+  --detector-model-name IDEA-Research/grounding-dino-tiny \
+  --device auto \
+  --batch-size 16 \
+  --max-crops-per-image 4 \
+  --crop-pooling avg \
+  --l2-normalize-concat \
+  --clear-output
+```
+
+You can override the source-aware prompt sets if needed:
+
+```bash
+./venv/bin/python scripts/run_siglip_grounding_dino_fusion_holdout.py \
+  --source-root data/chat \
+  --source-root data/social \
+  --chat-prompt-labels "message bubble,chat message,text message,sms,message block,conversation text,notification banner,link preview,button,qr code" \
+  --social-prompt-labels "social media post,post card,caption text,text overlay,headline,news card,logo,profile picture,person,face,button,qr code"
+```
+
+With `chat` and `social`, `--test-total 80` means:
+
+- `20` test images from `chat/real`
+- `20` test images from `chat/fake`
+- `20` test images from `social/real`
+- `20` test images from `social/fake`
+
+Main artifacts:
+
+- split manifest: `outputs/chat_social_grounding_dino_fusion/manifest.json`
+- split CSVs: `outputs/chat_social_grounding_dino_fusion/split/`
+- global embeddings: `outputs/chat_social_grounding_dino_fusion/global_siglip/embeddings/`
+- GroundingDINO crops: `outputs/chat_social_grounding_dino_fusion/grounding_dino_crop_siglip/crops/`
+- crop embeddings: `outputs/chat_social_grounding_dino_fusion/grounding_dino_crop_siglip/embeddings/`
+- fusion embeddings: `outputs/chat_social_grounding_dino_fusion/fusion_concat_siglip/embeddings/`
+- saved joblib models:
+  - `.../global_siglip/models/`
+  - `.../grounding_dino_crop_siglip/models/`
+  - `.../fusion_concat_siglip/models/`
+- final metrics table: `outputs/chat_social_grounding_dino_fusion/summary/final_test_metrics.csv`
+- final report: `outputs/chat_social_grounding_dino_fusion/summary/final_report.md`
+
 Run single-image inference:
 
 ```bash
