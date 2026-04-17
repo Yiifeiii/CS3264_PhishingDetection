@@ -394,9 +394,45 @@ def _main() -> int:
     parser.add_argument("--image", required=True, help="Path to image file.")
     parser.add_argument("--source", default="chat",
                         help="Source hint: 'chat', 'social', or '' for default.")
+    parser.add_argument(
+        "--text-model",
+        default="",
+        help="Optional text-model override for the OCR text branch.",
+    )
+    parser.add_argument(
+        "--ollama-model",
+        default="",
+        help="Optional Ollama model override for the OCR text branch.",
+    )
+    parser.add_argument(
+        "--ollama-host",
+        default="",
+        help="Optional Ollama host override for the OCR text branch.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default="",
+        help="Optional ensemble artifacts directory override containing calibrated_ensemble.joblib and thresholds.json.",
+    )
     args = parser.parse_args()
 
-    predictor = BayesianPredictor()
+    predictor_cfg = None
+    if args.artifacts_dir:
+        artifacts_dir = Path(args.artifacts_dir)
+        predictor_cfg = PredictorConfig(
+            calibrated_path=artifacts_dir / "calibrated_ensemble.joblib",
+            thresholds_path=artifacts_dir / "thresholds.json",
+        )
+
+    app_config = Config()
+    if args.text_model:
+        app_config.TEXT_PHISHING_MODEL_NAME = args.text_model
+    if args.ollama_model:
+        app_config.OCR_OLLAMA_MODEL = args.ollama_model
+    if args.ollama_host:
+        app_config.OCR_OLLAMA_HOST = args.ollama_host
+
+    predictor = BayesianPredictor(cfg=predictor_cfg, app_config=app_config)
     result = predictor.predict(args.image, source_name=args.source)
     print(json.dumps(result, indent=2))
     return 0
