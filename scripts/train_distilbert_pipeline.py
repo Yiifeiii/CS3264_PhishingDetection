@@ -29,6 +29,7 @@ from ocr.ocr_service import OCRService
 from utils.config import Config
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
+from utils.text_pipeline_runtime import analyze_text_with_optional_model_text, run_text_pipeline_on_image
 from utils.text_risk_analyzer import TextRiskAnalyzer
 
 
@@ -191,10 +192,17 @@ def build_split_rows(
     print(f"Found {len(files)} image(s) in {label_dir}")
 
     for image_path in files:
-        raw_text = ocr.extract_text(str(image_path))
-        processed = processor.process(raw_text)
-        processed_text = str(processed.get("text") or "").strip()
-        prepared = analyzer.prepare_model_input(processed_text)
+        text_runtime = run_text_pipeline_on_image(
+            ocr,
+            processor,
+            analyzer,
+            str(image_path),
+        )
+        raw_text = str(text_runtime["raw_text"] or "")
+        processed = text_runtime["processed"]
+        processed_text = str(text_runtime["processed_text"] or "").strip()
+        model_processed_text = str(text_runtime.get("model_processed_text") or processed_text).strip()
+        prepared = analyzer.prepare_model_input(model_processed_text)
         model_text = str(prepared.get("model_input_text") or "").strip()
 
         row = {
@@ -207,6 +215,7 @@ def build_split_rows(
             "contains_chinese": bool(processed.get("contains_chinese")),
             "raw_text": raw_text,
             "processed_text": processed_text,
+            "model_processed_text": model_processed_text,
             "filtered_text": prepared["filtered_text"],
             "model_input_text": prepared["model_input_text"],
             "relevant_chunks": " | ".join(prepared["relevant_chunks"]),
@@ -371,7 +380,18 @@ def logits_to_argmax_metrics(predictions) -> dict:
 def analyze_pipeline_rows(rows: list[dict], analyzer: TextRiskAnalyzer) -> list[dict]:
     analyzed_rows: list[dict] = []
     for row in rows:
-        result = analyzer.analyze(str(row["processed_text"]))
+        heuristic_text = str(row["processed_text"] or "")
+        model_text = str(row.get("model_processed_text") or heuristic_text)
+        result = analyze_text_with_optional_model_text(
+            analyzer,
+            heuristic_text,
+            model_text,
+            aggregation_mode=(
+                "hybrid_max_model"
+                if model_text.strip() and model_text.strip() != heuristic_text.strip()
+                else "concat"
+            ),
+        )
         analyzed_rows.append(
             {
                 "path": row["path"],
@@ -524,7 +544,12 @@ def main() -> int:
 
     ocr = build_ocr_service(cfg, args)
     processor = OCRTextProcessor(cfg)
-    prep_analyzer = TextRiskAnalyzer(cfg, load_models=False)
+    use_loaded_model_for_region_max = bool(
+        getattr(args, "ocr_backend", "easyocr") == "easyocr"
+        and getattr(args, "easyocr_use_grounding_dino", False)
+        and getattr(args, "easyocr_grounding_text_aggregation", "concat") in {"max_model", "hybrid_max_model"}
+    )
+    prep_analyzer = TextRiskAnalyzer(cfg, load_models=use_loaded_model_for_region_max)
 
     split_rows: dict[str, list[dict]] = {}
     split_skipped: dict[str, list[dict]] = {}
@@ -557,6 +582,7 @@ def main() -> int:
             f"skipped={len(split_skipped[split_name])}"
         )
     print(f"OCR backend: {args.ocr_backend}")
+    print(f"OCR load warning: {ocr.load_error}")
     for label, value in ocr.runtime_details().items():
         print(f"{label}: {value}")
 

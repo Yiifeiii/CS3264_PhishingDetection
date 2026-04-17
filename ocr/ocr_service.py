@@ -96,6 +96,7 @@ class OCRService:
         easyocr_grounding_text_threshold: float = 0.25,
         easyocr_grounding_max_regions: int = 6,
         easyocr_grounding_padding_ratio: float = 0.03,
+        easyocr_grounding_text_aggregation: str = "concat",
         transformers_model: str = DEFAULT_TRANSFORMERS_MODEL,
         transformers_task_prompt: str = DEFAULT_TRANSFORMERS_TASK_PROMPT,
         transformers_max_new_tokens: int = 1024,
@@ -126,6 +127,9 @@ class OCRService:
         self.easyocr_grounding_text_threshold = float(easyocr_grounding_text_threshold)
         self.easyocr_grounding_max_regions = int(easyocr_grounding_max_regions)
         self.easyocr_grounding_padding_ratio = float(easyocr_grounding_padding_ratio)
+        self.easyocr_grounding_text_aggregation = str(
+            easyocr_grounding_text_aggregation or "concat"
+        ).strip().lower()
         self.easyocr_grounding_processor = None
         self.easyocr_grounding_model = None
         self.easyocr_grounding_device = "cuda" if self.gpu else "cpu"
@@ -356,10 +360,11 @@ class OCRService:
             self.load_error = str(exc)
             return ""
 
-        self.last_grounding_dino_regions = regions
+        self.last_grounding_dino_regions = []
         if not regions:
             return ""
 
+        enriched_regions = []
         texts = []
         for region in regions:
             crop = self._crop_image_with_box(
@@ -368,9 +373,13 @@ class OCRService:
                 padding_ratio=self.easyocr_grounding_padding_ratio,
             )
             crop_text = self._extract_text_from_image_variants(crop)
+            enriched_region = dict(region)
+            enriched_region["ocr_text"] = crop_text
+            enriched_regions.append(enriched_region)
             if crop_text:
                 texts.append(crop_text)
 
+        self.last_grounding_dino_regions = enriched_regions
         return self._join_unique_text_segments(texts)
 
     def _extract_text_from_image_variants(self, image: Image.Image) -> str:
@@ -822,6 +831,7 @@ class OCRService:
                         "EasyOCR Grounding Text Threshold": self.easyocr_grounding_text_threshold,
                         "EasyOCR Grounding Max Regions": self.easyocr_grounding_max_regions,
                         "EasyOCR Grounding Padding Ratio": self.easyocr_grounding_padding_ratio,
+                        "EasyOCR Grounding Text Aggregation": self.easyocr_grounding_text_aggregation,
                         "EasyOCR Grounding Device": self.easyocr_grounding_device,
                         "EasyOCR Grounding Regions Found": len(self.last_grounding_dino_regions),
                     }

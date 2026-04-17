@@ -196,8 +196,8 @@ def score_text_branch(
     ocr: OCRService,
     processor: OCRTextProcessor,
     analyzer: TextRiskAnalyzer,
-) -> tuple[dict, str]:
-    """Return (scores_dict, raw_text)."""
+) -> tuple[dict, str, bool]:
+    """Return (scores_dict, raw_text, has_usable_text)."""
     try:
         raw_text = ocr.extract_text(image_path) or ""
     except Exception:
@@ -220,7 +220,7 @@ def score_text_branch(
         if analysis.get("model_score_raw") is not None:
             scores["ocr_distilbert_model"] = float(analysis["model_score_raw"])
 
-    return scores, raw_text
+    return scores, raw_text, bool(processed_text)
 
 
 # ── Main predictor ──────────────────────────────────────────────────
@@ -243,6 +243,7 @@ class BayesianPredictor:
         self.calibrated_model = bundle["model"]
         self.feature_names: list[str] = list(bundle["feature_names"])
         self.calibration_method: str = bundle["method"]
+        self.missing_text_policy: str = str(bundle.get("missing_text_policy", "neutral_impute"))
 
         # Load branch classifiers
         self.fused_clf = joblib.load(self.cfg.fused_clf_path)
@@ -296,7 +297,7 @@ class BayesianPredictor:
         crop_siglip_dino_prob = float(self.crop_clf.predict_proba(crop_vec)[0, 1])
 
         # Text branch
-        text_scores, raw_text = score_text_branch(
+        text_scores, raw_text, text_available = score_text_branch(
             image_path, self.ocr, self.text_processor, self.text_analyzer,
         )
 
@@ -307,13 +308,18 @@ class BayesianPredictor:
         }
 
         # Meta-classifier feature vector in trained order
-        x = np.array(
-            [[branch_scores.get(name, 0.5) for name in self.feature_names]],
-            dtype=np.float64,
-        )
-        uncal_prob = float(self.calibrated_model.predict_proba(x)[0, 1])
-        calibrated_prob = uncal_prob  # CalibratedClassifierCV already produces calibrated output
-        raw_fused_prob = calibrated_prob
+        if (not text_available) and self.missing_text_policy == "fallback_to_image_only":
+            uncal_prob = float(fuse_siglip_dino_prob)
+            calibrated_prob = uncal_prob
+            raw_fused_prob = calibrated_prob
+        else:
+            x = np.array(
+                [[branch_scores.get(name, 0.5) for name in self.feature_names]],
+                dtype=np.float64,
+            )
+            uncal_prob = float(self.calibrated_model.predict_proba(x)[0, 1])
+            calibrated_prob = uncal_prob  # CalibratedClassifierCV already produces calibrated output
+            raw_fused_prob = calibrated_prob
 
         # Step 4: safety guardrail — crop-SigLIP branch veto
         guardrail_fired = False
@@ -327,6 +333,7 @@ class BayesianPredictor:
             fuse_prob=fuse_siglip_dino_prob,
             crop_prob=crop_siglip_dino_prob,
             text_score=text_scores["ocr_distilbert_combined"],
+            text_available=text_available,
             guardrail_fired=guardrail_fired,
         )
 
@@ -357,6 +364,7 @@ class BayesianPredictor:
         fuse_prob: float,
         crop_prob: float,
         text_score: float,
+        text_available: bool,
         guardrail_fired: bool,
     ) -> str:
         parts: list[str] = []
@@ -366,8 +374,12 @@ class BayesianPredictor:
                 f"(p={crop_prob:.2f} ≥ {self.cfg.crop_guardrail_threshold}); "
                 "elevated to medium by safety guardrail"
             )
+        if (not text_available) and self.missing_text_policy == "fallback_to_image_only":
+            parts.append("OCR text unavailable; fell back to image-only scoring")
         # Which branch drove the decision
-        if fuse_prob - text_score > 0.15:
+        if not text_available:
+            parts.append(f"vision-only decision (fused SigLIP+DINO p={fuse_prob:.2f})")
+        elif fuse_prob - text_score > 0.15:
             parts.append(f"vision-dominant (fused SigLIP+DINO p={fuse_prob:.2f} "
                          f"> text score {text_score:.2f})")
         elif text_score - fuse_prob > 0.15:
@@ -394,9 +406,45 @@ def _main() -> int:
     parser.add_argument("--image", required=True, help="Path to image file.")
     parser.add_argument("--source", default="chat",
                         help="Source hint: 'chat', 'social', or '' for default.")
+    parser.add_argument(
+        "--text-model",
+        default="",
+        help="Optional text-model override for the OCR text branch.",
+    )
+    parser.add_argument(
+        "--ollama-model",
+        default="",
+        help="Optional Ollama model override for the OCR text branch.",
+    )
+    parser.add_argument(
+        "--ollama-host",
+        default="",
+        help="Optional Ollama host override for the OCR text branch.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default="",
+        help="Optional ensemble artifacts directory override containing calibrated_ensemble.joblib and thresholds.json.",
+    )
     args = parser.parse_args()
 
-    predictor = BayesianPredictor()
+    predictor_cfg = None
+    if args.artifacts_dir:
+        artifacts_dir = Path(args.artifacts_dir)
+        predictor_cfg = PredictorConfig(
+            calibrated_path=artifacts_dir / "calibrated_ensemble.joblib",
+            thresholds_path=artifacts_dir / "thresholds.json",
+        )
+
+    app_config = Config()
+    if args.text_model:
+        app_config.TEXT_PHISHING_MODEL_NAME = args.text_model
+    if args.ollama_model:
+        app_config.OCR_OLLAMA_MODEL = args.ollama_model
+    if args.ollama_host:
+        app_config.OCR_OLLAMA_HOST = args.ollama_host
+
+    predictor = BayesianPredictor(cfg=predictor_cfg, app_config=app_config)
     result = predictor.predict(args.image, source_name=args.source)
     print(json.dumps(result, indent=2))
     return 0

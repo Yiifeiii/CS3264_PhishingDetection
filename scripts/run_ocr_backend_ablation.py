@@ -16,9 +16,11 @@ from ocr.ocr_service import OCRService
 from utils.config import Config
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.text_risk_analyzer import TextRiskAnalyzer
+from utils.text_pipeline_runtime import TEXT_DECISION_SOURCE_CHOICES, resolve_text_score_key
 
 
 def parse_args() -> argparse.Namespace:
+    cfg = Config()
     parser = argparse.ArgumentParser(
         description=(
             "Run OCR-backend ablations across multiple text models. "
@@ -68,8 +70,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--decision-source",
-        choices=["combined", "model", "model_raw"],
-        default="combined",
+        choices=TEXT_DECISION_SOURCE_CHOICES,
+        default=cfg.TEXT_DECISION_SOURCE,
         help="Which score to threshold for the text pipeline.",
     )
     parser.add_argument(
@@ -214,14 +216,6 @@ def evaluate_threshold(records: list[dict[str, object]], threshold: float) -> di
     }
 
 
-def resolve_score_key(decision_source: str) -> str:
-    return {
-        "combined": "score",
-        "model": "model_score",
-        "model_raw": "model_score_raw",
-    }[decision_source]
-
-
 def parse_backend_list(value: str) -> list[str]:
     allowed = {"easyocr", "ollama_csv", "ollama", "transformers"}
     backends = [token.strip().lower() for token in str(value).split(",") if token.strip()]
@@ -338,7 +332,7 @@ def build_rows_from_backend(
 
 
 def build_scored_records(rows: list[dict], analyzer: TextRiskAnalyzer, decision_source: str) -> list[dict[str, object]]:
-    score_key = resolve_score_key(decision_source)
+    score_key = resolve_text_score_key(decision_source)
     records: list[dict[str, object]] = []
 
     for row in rows:

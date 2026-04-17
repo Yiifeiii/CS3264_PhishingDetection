@@ -6,7 +6,13 @@ import json
 from pathlib import Path
 import sys
 
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -15,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.config import Config
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.text_risk_analyzer import TextRiskAnalyzer
+from utils.text_pipeline_runtime import TEXT_DECISION_SOURCE_CHOICES, resolve_text_score_key
 
 
 LABEL_TO_ID = {
@@ -24,6 +31,7 @@ LABEL_TO_ID = {
 
 
 def parse_args() -> argparse.Namespace:
+    cfg = Config()
     parser = argparse.ArgumentParser(
         description=(
             "Evaluate the full text phishing pipeline from a pre-extracted OCR CSV "
@@ -53,8 +61,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--decision-source",
-        choices=["combined", "model", "model_raw"],
-        default="combined",
+        choices=TEXT_DECISION_SOURCE_CHOICES,
+        default=cfg.TEXT_DECISION_SOURCE,
         help="Whether predictions should use the full text score, calibrated model score, or raw model probability.",
     )
     parser.add_argument(
@@ -114,15 +122,7 @@ def normalize_path(value: str) -> str:
     return str(Path(value)).replace("/", "\\").lower()
 
 
-def resolve_score_key(decision_source: str) -> str:
-    return {
-        "combined": "score",
-        "model": "model_score",
-        "model_raw": "model_score_raw",
-    }[decision_source]
-
-
-def compute_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, float]:
+def compute_metrics(y_true: list[int], y_pred: list[int], y_score: list[float] | None = None) -> dict[str, float | None]:
     accuracy = accuracy_score(y_true, y_pred)
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true,
@@ -130,11 +130,18 @@ def compute_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, float]:
         average="binary",
         zero_division=0,
     )
+    roc_auc = None
+    if y_score is not None:
+        try:
+            roc_auc = float(roc_auc_score(y_true, y_score))
+        except ValueError:
+            roc_auc = None
     return {
         "accuracy": float(accuracy),
         "precision": float(precision),
         "recall": float(recall),
         "f1": float(f1),
+        "roc_auc": roc_auc,
     }
 
 
@@ -153,12 +160,12 @@ def pick_best_threshold(records: list[dict[str, object]], objective: str) -> tup
 
     for threshold in candidate_thresholds:
         preds = [1 if score >= threshold else 0 for score in scores]
-        metrics = compute_metrics(labels, preds)
+        metrics = compute_metrics(labels, preds, scores)
         comparison_key = (
-            metrics[objective],
-            metrics["accuracy"],
-            metrics["f1"],
-            metrics["precision"],
+            float(metrics[objective] or 0.0),
+            float(metrics["accuracy"] or 0.0),
+            float(metrics["f1"] or 0.0),
+            float(metrics["precision"] or 0.0),
             -threshold,
         )
         if comparison_key > best_key:
@@ -171,14 +178,16 @@ def pick_best_threshold(records: list[dict[str, object]], objective: str) -> tup
 
 def evaluate_threshold(records: list[dict[str, object]], threshold: float) -> dict[str, object]:
     y_true = [int(record["true_label"]) for record in records]
+    y_score = [float(record["decision_score"]) for record in records]
     y_pred = [1 if float(record["decision_score"]) >= threshold else 0 for record in records]
-    metrics = compute_metrics(y_true, y_pred)
+    metrics = compute_metrics(y_true, y_pred, y_score)
     return {
         "metrics": metrics,
         "rows_used": len(records),
         "positive_predictions": int(sum(y_pred)),
         "y_true": y_true,
         "y_pred": y_pred,
+        "y_score": y_score,
     }
 
 
@@ -237,7 +246,7 @@ def main() -> int:
         "test": [],
     }
     skipped_rows: list[dict[str, object]] = []
-    score_key = resolve_score_key(args.decision_source)
+    score_key = resolve_text_score_key(args.decision_source)
 
     for index, row in enumerate(manifest_rows):
         split = str(row.get("split") or "").strip().lower()
@@ -340,11 +349,14 @@ def main() -> int:
         f"Tune metrics: accuracy={tune_eval['metrics']['accuracy']:.4f} "
         f"precision={tune_eval['metrics']['precision']:.4f} "
         f"recall={tune_eval['metrics']['recall']:.4f} "
-        f"f1={tune_eval['metrics']['f1']:.4f}"
+        f"f1={tune_eval['metrics']['f1']:.4f} "
+        f"auc={tune_eval['metrics']['roc_auc']:.4f}"
     )
     print()
     print(f"Eval split: {args.eval_split} | rows used: {len(eval_records)}")
     print(f"Accuracy: {final_eval['metrics']['accuracy']:.4f}")
+    print(f"F1: {final_eval['metrics']['f1']:.4f}")
+    print(f"ROC AUC: {final_eval['metrics']['roc_auc']:.4f}")
     print("Confusion matrix [ [tn, fp], [fn, tp] ]:")
     print(confusion_matrix(final_eval["y_true"], final_eval["y_pred"], labels=[0, 1]))
     print()

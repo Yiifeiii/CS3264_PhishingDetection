@@ -13,6 +13,7 @@ from utils.config import Config
 from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.text_risk_analyzer import TextRiskAnalyzer
+from utils.text_pipeline_runtime import run_text_pipeline_on_image
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,12 +72,17 @@ def main() -> int:
     processor = OCRTextProcessor(cfg)
     analyzer = TextRiskAnalyzer(cfg)
 
-    raw_text = ocr.extract_text(str(image_path))
-    processed = processor.process(raw_text)
-    processed_text = str(processed.get("text") or "")
-    result = analyzer.analyze(processed_text)
-    if processed.get("warning"):
-        result.setdefault("warnings", []).append(processed["warning"])
+    text_runtime = run_text_pipeline_on_image(
+        ocr,
+        processor,
+        analyzer,
+        str(image_path),
+    )
+    raw_text = str(text_runtime["raw_text"] or "")
+    processed = text_runtime["processed"]
+    processed_text = str(text_runtime["processed_text"] or "")
+    model_processed_text = str(text_runtime.get("model_processed_text") or processed_text)
+    result = text_runtime["text_result"]
 
     print(f"Image: {image_path}")
     print(f"OCR Backend: {ocr.backend}")
@@ -106,6 +112,10 @@ def main() -> int:
     print()
     print("OCR Processed Text:")
     print(safe_console_text(processed_text))
+    if model_processed_text.strip() and model_processed_text.strip() != processed_text.strip():
+        print()
+        print("Model Processed Text:")
+        print(safe_console_text(model_processed_text))
     print()
     print("Text Result:")
     print(safe_console_text(result))

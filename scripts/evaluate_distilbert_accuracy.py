@@ -14,6 +14,11 @@ from utils.config import Config
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
 from utils.text_risk_analyzer import TextRiskAnalyzer
+from utils.text_pipeline_runtime import (
+    TEXT_DECISION_SOURCE_CHOICES,
+    resolve_text_score_key,
+    run_text_pipeline_on_image,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,12 +51,12 @@ def parse_args() -> argparse.Namespace:
         "--threshold",
         type=float,
         default=None,
-        help="Decision threshold for the combined text score. Defaults to MEDIUM_RISK_THRESHOLD.",
+        help="Decision threshold for the selected text score. Defaults to MEDIUM_RISK_THRESHOLD.",
     )
     parser.add_argument(
         "--decision-source",
-        choices=["combined", "model", "model_raw"],
-        default="combined",
+        choices=TEXT_DECISION_SOURCE_CHOICES,
+        default=cfg.TEXT_DECISION_SOURCE,
         help="Whether predictions should use the full text score, calibrated model score, or raw model probability.",
     )
     parser.add_argument(
@@ -107,14 +112,6 @@ def collect_images(root: Path, limit: int | None) -> list[Path]:
 def safe_console_text(text: str) -> str:
     normalized = str(text)
     return normalized.encode("cp1252", errors="backslashreplace").decode("cp1252")
-
-
-def resolve_score_key(decision_source: str) -> str:
-    return {
-        "combined": "score",
-        "model": "model_score",
-        "model_raw": "model_score_raw",
-    }[decision_source]
 
 
 def compute_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, float]:
@@ -212,9 +209,15 @@ def main() -> int:
     dataset = [(1, p) for p in phishing_files] + [(0, p) for p in non_phishing_files]
 
     for label, image_path in dataset:
-        raw_text = ocr.extract_text(str(image_path))
-        processed = processor.process(raw_text)
-        text = processed["text"]
+        text_runtime = run_text_pipeline_on_image(
+            ocr,
+            processor,
+            analyzer,
+            str(image_path),
+        )
+        raw_text = str(text_runtime["raw_text"] or "")
+        processed = text_runtime["processed"]
+        text = str(text_runtime["processed_text"] or "")
         if processed.get("contains_chinese"):
             chinese_hits += 1
             if len(chinese_samples) < args.show_chinese_samples:
@@ -238,10 +241,10 @@ def main() -> int:
             skipped_no_text.append(str(image_path))
             continue
 
-        result = analyzer.analyze(text)
+        result = text_runtime["text_result"]
         if result.get("model_route") in route_counts:
             route_counts[str(result.get("model_route"))] += 1
-        score_key = resolve_score_key(args.decision_source)
+        score_key = resolve_text_score_key(args.decision_source)
         score = float(result.get(score_key) or 0.0)
         used_images.append(str(image_path))
 

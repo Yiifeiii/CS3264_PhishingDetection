@@ -56,7 +56,14 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from train_bayesian_ensemble import FEATURE_COLUMNS, load_scores  # noqa: E402
+from train_bayesian_ensemble import (  # noqa: E402
+    FEATURE_COLUMNS,
+    IMAGE_FEATURE,
+    TEXT_FEATURE,
+    apply_missing_text_fallback,
+    load_feature_presence,
+    load_scores,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,6 +92,11 @@ def verdicts_from_probs(probs: np.ndarray, t_low: float, t_high: float) -> np.nd
 def binary_flag_from_verdicts(verdicts: np.ndarray) -> np.ndarray:
     """Treat medium + high as positive flags (scam)."""
     return (verdicts >= 1).astype(np.int64)
+
+
+def safe_console_text(text: str) -> str:
+    normalized = str(text)
+    return normalized.encode("cp1252", errors="backslashreplace").decode("cp1252")
 
 
 def metrics_at_thresholds(
@@ -126,13 +138,21 @@ def main() -> int:
     best_C = float(bundle["base_C"])
     method = bundle["method"]
     calibrated_model = bundle["model"]
+    missing_text_policy = str(bundle.get("missing_text_policy", "neutral_impute"))
     print(f"Calibrated model: method={method}, base C={best_C:.6f}, features={feature_names}")
 
     train_csv = input_dir / "train_scores.csv"
     test_csv = input_dir / "test_scores.csv"
     X_train, y_train, _ = load_scores(train_csv, feature_names)
     X_test, y_test, _ = load_scores(test_csv, feature_names)
+    text_present_train = load_feature_presence(train_csv, TEXT_FEATURE)
+    text_present_test = load_feature_presence(test_csv, TEXT_FEATURE)
+    image_idx = feature_names.index(IMAGE_FEATURE)
     print(f"Train: {X_train.shape[0]} samples, Test: {X_test.shape[0]} samples")
+    print(
+        f"Text-present rows: train {int(text_present_train.sum())}/{len(text_present_train)}, "
+        f"test {int(text_present_test.sum())}/{len(text_present_test)}"
+    )
 
     # OOF calibrated probabilities on TRAIN.
     # We rebuild a CalibratedClassifierCV with the same hyperparameters so
@@ -162,6 +182,12 @@ def main() -> int:
         method="predict_proba",
         n_jobs=1,
     )[:, 1]
+    if missing_text_policy == "fallback_to_image_only":
+        oof_probs = apply_missing_text_fallback(
+            oof_probs,
+            X_train[:, image_idx],
+            text_present_train,
+        )
 
     # ── Optuna study ────────────────────────────────────────────────
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -183,13 +209,23 @@ def main() -> int:
     t_high = float(study.best_params["t_high"])
     best_fbeta = float(study.best_value)
     n_pruned = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.PRUNED)
-    print(f"\nOptuna best: t_low={t_low:.4f}, t_high={t_high:.4f}, "
-          f"F-β({args.beta})={best_fbeta:.4f}")
+    print(
+        safe_console_text(
+            f"\nOptuna best: t_low={t_low:.4f}, t_high={t_high:.4f}, "
+            f"F-beta({args.beta})={best_fbeta:.4f}"
+        )
+    )
     print(f"  ({len(study.trials)} trials, {n_pruned} pruned by constraint)")
 
     # ── Evaluate on TRAIN (OOF) and TEST at chosen thresholds ───────
     train_metrics = metrics_at_thresholds(y_train, oof_probs, t_low, t_high, args.beta)
     test_probs = calibrated_model.predict_proba(X_test)[:, 1]
+    if missing_text_policy == "fallback_to_image_only":
+        test_probs = apply_missing_text_fallback(
+            test_probs,
+            X_test[:, image_idx],
+            text_present_test,
+        )
     test_metrics = metrics_at_thresholds(y_test, test_probs, t_low, t_high, args.beta)
 
     # Add macro F1 / AUC on test for the paper results table
@@ -222,10 +258,13 @@ def main() -> int:
         "pruned_trials": n_pruned,
         "beta": args.beta,
         "calibration_method": method,
+        "missing_text_policy": missing_text_policy,
         "features": feature_names,
         "oof_cv_folds": args.cv_folds,
         "best_params": {"t_low": t_low, "t_high": t_high},
         "objective_value_oof": best_fbeta,
+        "text_present_train_rows": int(text_present_train.sum()),
+        "text_present_test_rows": int(text_present_test.sum()),
         "train_oof_metrics": train_metrics,
         "test_metrics": test_metrics,
     }

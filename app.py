@@ -11,6 +11,7 @@ from utils.ocr_text_processor import OCRTextProcessor
 from utils.text_risk_analyzer import TextRiskAnalyzer
 from utils.risk_fusion_service import RiskFusionService
 from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
+from utils.text_pipeline_runtime import run_text_pipeline_on_image
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,13 +44,16 @@ class App:
         image = self.preprocessor.load_image(path)
 
         image_result = self.infer.predict(image)
-        raw_text = self.ocr.extract_text(path)
-        processed_text = self.ocr_text_processor.process(raw_text)
-        text = processed_text["text"]
-        text_result = self.text_analyzer.analyze(text)
-        if processed_text.get("warning"):
-            text_result.setdefault("warnings", []).append(processed_text["warning"])
-        text_result["ocr_processing"] = processed_text
+        text_runtime = run_text_pipeline_on_image(
+            self.ocr,
+            self.ocr_text_processor,
+            self.text_analyzer,
+            path,
+        )
+        raw_text = text_runtime["raw_text"]
+        processed_text = text_runtime["processed"]
+        text = text_runtime["processed_text"]
+        text_result = text_runtime["text_result"]
         fused_result = self.risk_fusion.combine(image_result, text_result)
 
         print(f"\nImage: {path}")
