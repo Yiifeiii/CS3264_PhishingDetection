@@ -1,18 +1,24 @@
-"""Train a Bayesian meta-classifier that fuses SigLIP + text pipeline scores.
+"""Train a Bayesian meta-classifier that fuses the two sub-model scores.
 
-Reads the CSV outputs of ``extract_ensemble_scores.py`` and trains two
-ensemble variants:
+Reads the CSV outputs of ``extract_ensemble_scores.py`` (one row per image
+with scores from Model A and Model B) and trains two ensemble variants:
 
-1. **Naive Bayes with KDE** -- estimates class-conditional score densities
+1. **Naive Bayes with KDE** — estimates class-conditional score densities
    P(s | phishing) and P(s | legit) via Kernel Density Estimation, then
    combines via log-likelihood ratios.  Pure Bayesian, highly interpretable.
 
-2. **L2-Regularised Logistic Regression** (= Bayesian MAP estimation) --
+2. **L2-Regularised Logistic Regression** (= Bayesian MAP estimation) —
    the L2 penalty is equivalent to a Gaussian prior N(0, 1/C) on the
-   weights.  Regularisation strength C is tuned via stratified 5-fold CV
-   on the validation set.
+   weights.  Regularisation strength C is tuned via stratified 5-fold CV.
 
-Both models are trained on **val** scores and evaluated on **test** scores.
+Sub-models being combined:
+    - Model A: fuse_siglip_DINO          → ``fuse_siglip_dino_prob``
+    - Model B: ocr_ollama_distilbert     → ``ocr_distilbert_combined``
+                                           (``_heuristic`` and ``_model``
+                                           are also available as auxiliary
+                                           features.)
+
+Both models are trained on **train** scores and evaluated on **test** scores.
 
 Output
 ------
@@ -26,7 +32,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,13 +51,14 @@ from sklearn.neighbors import KernelDensity
 
 # ── Feature definitions ─────────────────────────────────────────────
 
+IMAGE_FEATURE = "fuse_siglip_dino_prob"             # Model A
+TEXT_FEATURE = "ocr_distilbert_combined"            # Model B (primary)
+
 FEATURE_COLUMNS = [
-    "siglip_logreg_prob",
-    "siglip_lightgbm_prob",
-    "siglip_xgboost_prob",
-    "text_combined_score",
-    "text_heuristic_score",
-    "text_preprocess_model_score",
+    IMAGE_FEATURE,
+    TEXT_FEATURE,
+    "ocr_distilbert_heuristic",
+    "ocr_distilbert_model",
 ]
 
 IMPUTE_VALUE = 0.5  # neutral score for missing text values
@@ -60,11 +66,14 @@ IMPUTE_VALUE = 0.5  # neutral score for missing text values
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train Bayesian ensemble meta-classifier.")
-    p.add_argument("--input-dir", default="artifacts/ensemble", help="Dir with val_scores.csv, test_scores.csv")
-    p.add_argument("--output-dir", default="artifacts/ensemble", help="Dir for trained models and reports")
+    p.add_argument("--input-dir", default="artifacts/ensemble",
+                    help="Dir with train_scores.csv, test_scores.csv")
+    p.add_argument("--output-dir", default="artifacts/ensemble",
+                    help="Dir for trained models and reports")
     p.add_argument("--features", default=",".join(FEATURE_COLUMNS),
                     help="Comma-separated feature columns to use.")
-    p.add_argument("--cv-folds", type=int, default=5, help="Number of CV folds for LogReg tuning.")
+    p.add_argument("--cv-folds", type=int, default=5,
+                    help="Number of CV folds for hyperparameter tuning.")
     return p.parse_args()
 
 
@@ -84,12 +93,11 @@ def load_scores(csv_path: Path, feature_names: list[str]) -> tuple[np.ndarray, n
 
     for i, row in enumerate(rows):
         y[i] = int(row["label"])
-        filenames.append(row["filename"])
+        filenames.append(row.get("filename", row.get("image_path", "")))
         for j, col in enumerate(feature_names):
             val = row.get(col, "").strip()
             if val:
                 X[i, j] = float(val)
-            # else: stays IMPUTE_VALUE
 
     return X, y, filenames
 
@@ -134,12 +142,9 @@ class NaiveBayesKDE:
         X_phish = X[y == 1]
         X_legit = X[y == 0]
 
-        # Prior: P(phishing) / P(legit)
         n_phish = max(len(X_phish), 1)
         n_legit = max(len(X_legit), 1)
         self.log_prior_ratio = float(np.log(n_phish / n_legit))
-        print(f"  Log prior ratio: {self.log_prior_ratio:.4f} (n_phish={n_phish}, n_legit={n_legit})")
-        # -0.2007 (n_phish=18, n_legit=22)
 
         self.kdes_phishing = []
         self.kdes_legit = []
@@ -161,8 +166,6 @@ class NaiveBayesKDE:
             log_l = self.kdes_legit[j].score_samples(X[:, j:j+1])
             log_odds += log_p - log_l
 
-        # sigmoid to convert log-odds to probability (clip to avoid overflow in exp)
-        log_odds = np.clip(log_odds, -500, 500)
         prob_phishing = 1.0 / (1.0 + np.exp(-log_odds))
         return np.column_stack([1.0 - prob_phishing, prob_phishing])
 
@@ -227,10 +230,10 @@ def tune_logreg(X: np.ndarray, y: np.ndarray, cv_folds: int) -> tuple[float, flo
 
 # ── Baselines ───────────────────────────────────────────────────────
 
-def weighted_average_baseline(X: np.ndarray, siglip_idx: int, text_idx: int,
+def weighted_average_baseline(X: np.ndarray, img_idx: int, txt_idx: int,
                                image_weight: float = 0.35) -> np.ndarray:
-    """Replicate the current risk_fusion_service.py weighted average."""
-    return image_weight * X[:, siglip_idx] + (1.0 - image_weight) * X[:, text_idx]
+    """Replicate the original risk_fusion_service.py weighted average."""
+    return image_weight * X[:, img_idx] + (1.0 - image_weight) * X[:, txt_idx]
 
 
 # ── Main ────────────────────────────────────────────────────────────
@@ -244,53 +247,50 @@ def main() -> int:
     feature_names = [f.strip() for f in args.features.split(",") if f.strip()]
     print(f"Features: {feature_names}")
 
-    val_csv = input_dir / "val_scores.csv"
+    train_csv = input_dir / "train_scores.csv"
     test_csv = input_dir / "test_scores.csv"
-    for p in [val_csv, test_csv]:
+    for p in [train_csv, test_csv]:
         if not p.exists():
             print(f"ERROR: {p} not found. Run extract_ensemble_scores.py first.")
             return 1
 
-    X_val, y_val, _ = load_scores(val_csv, feature_names)
+    X_train, y_train, _ = load_scores(train_csv, feature_names)
     X_test, y_test, _ = load_scores(test_csv, feature_names)
-    print(f"Val: {X_val.shape[0]} samples, Test: {X_test.shape[0]} samples")
-    print(f"Val class balance: {np.sum(y_val==0)} legit, {np.sum(y_val==1)} phishing")
+    print(f"Train: {X_train.shape[0]} samples, Test: {X_test.shape[0]} samples")
+    print(f"Train class balance: {np.sum(y_train==0)} legit, {np.sum(y_train==1)} phishing")
     print(f"Test class balance: {np.sum(y_test==0)} legit, {np.sum(y_test==1)} phishing")
 
     report: dict = {"features": feature_names, "results": {}}
 
-    # ── Baseline 1: SigLIP models alone ──────────────────────────────
-    siglip_models = ["siglip_logreg_prob", "siglip_lightgbm_prob", "siglip_xgboost_prob"]
-    for col in siglip_models:
-        idx = feature_names.index(col)
-        probs = X_test[:, idx]
-        preds = (probs >= 0.5).astype(int)
-        m = compute_metrics(y_test, preds, probs)
-        model_name = col.replace("siglip_", "").replace("_prob", "")
-        report["results"][f"siglip_{model_name}_alone"] = m
-        print(f"\n[Baseline] SigLIP {model_name} alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
+    img_idx = feature_names.index(IMAGE_FEATURE)
+    txt_idx = feature_names.index(TEXT_FEATURE)
 
-    # ── Baseline 2: Best text pipeline alone ────────────────────────
-    text_idx = feature_names.index("text_combined_score")
-    text_probs_test = X_test[:, text_idx]
-    text_preds_test = (text_probs_test >= 0.5).astype(int)
-    m = compute_metrics(y_test, text_preds_test, text_probs_test)
-    report["results"]["text_alone"] = m
-    print(f"[Baseline] Text combined alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
+    # ── Baseline 1: fuse_siglip_DINO alone ──────────────────────────
+    probs = X_test[:, img_idx]
+    preds = (probs >= 0.5).astype(int)
+    m = compute_metrics(y_test, preds, probs)
+    report["results"]["fuse_siglip_dino_alone"] = m
+    print(f"\n[Baseline] fuse_siglip_DINO alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
 
-    # ── Baseline 3: Current weighted average (35/65) using xgboost ───
-    xgboost_idx = feature_names.index("siglip_xgboost_prob")
-    wa_probs_test = weighted_average_baseline(X_test, xgboost_idx, text_idx)
-    wa_preds_test = (wa_probs_test >= 0.5).astype(int)
-    m = compute_metrics(y_test, wa_preds_test, wa_probs_test)
+    # ── Baseline 2: ocr_ollama_distilbert alone ─────────────────────
+    probs = X_test[:, txt_idx]
+    preds = (probs >= 0.5).astype(int)
+    m = compute_metrics(y_test, preds, probs)
+    report["results"]["ocr_ollama_distilbert_alone"] = m
+    print(f"[Baseline] ocr_ollama_distilbert alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
+
+    # ── Baseline 3: Weighted average (35/65) ────────────────────────
+    wa_probs = weighted_average_baseline(X_test, img_idx, txt_idx)
+    preds = (wa_probs >= 0.5).astype(int)
+    m = compute_metrics(y_test, preds, wa_probs)
     report["results"]["weighted_average_35_65"] = m
     print(f"[Baseline] Weighted avg (35/65): acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
 
     # ── Method 1: Naive Bayes KDE ───────────────────────────────────
     print("\n--- Naive Bayes with KDE ---")
-    best_bw = tune_kde_bandwidth(X_val, y_val, args.cv_folds)
+    best_bw = tune_kde_bandwidth(X_train, y_train, args.cv_folds)
     nb = NaiveBayesKDE(bandwidth=best_bw)
-    nb.fit(X_val, y_val)
+    nb.fit(X_train, y_train)
 
     nb_probs_test = nb.predict_proba(X_test)[:, 1]
     nb_preds_test = nb.predict(X_test)
@@ -302,9 +302,9 @@ def main() -> int:
 
     # ── Method 2: L2 Logistic Regression (Bayesian MAP) ─────────────
     print("\n--- L2 Logistic Regression (Bayesian MAP) ---")
-    best_C, cv_acc = tune_logreg(X_val, y_val, args.cv_folds)
+    best_C, cv_acc = tune_logreg(X_train, y_train, args.cv_folds)
     lr = LogisticRegression(C=best_C, class_weight="balanced", max_iter=5000, random_state=42)
-    lr.fit(X_val, y_val)
+    lr.fit(X_train, y_train)
 
     lr_probs_test = lr.predict_proba(X_test)[:, 1]
     lr_preds_test = lr.predict(X_test)
@@ -325,21 +325,22 @@ def main() -> int:
     joblib.dump(lr, output_dir / "logreg_ensemble.joblib")
 
     # ── Summary table ───────────────────────────────────────────────
-    print("\n" + "=" * 65)
-    print(f"{'Method':<30} {'Acc':>7} {'Prec':>7} {'Rec':>7} {'F1':>7}")
-    print("-" * 65)
+    print("\n" + "=" * 70)
+    print(f"{'Method':<30} {'Acc':>7} {'Prec':>7} {'Rec':>7} {'F1':>7} {'AUC':>7}")
+    print("-" * 70)
     for method, metrics in report["results"].items():
         label = method.replace("_", " ").title()[:29]
+        auc = metrics.get("roc_auc", 0)
         print(
             f"{label:<30} "
             f"{metrics['accuracy']:>7.4f} "
             f"{metrics['precision']:>7.4f} "
             f"{metrics['recall']:>7.4f} "
-            f"{metrics['f1']:>7.4f}"
+            f"{metrics['f1']:>7.4f} "
+            f"{auc:>7.4f}"
         )
-    print("=" * 65)
+    print("=" * 70)
 
-    # Save report
     report_path = output_dir / "ensemble_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"\nReport saved to: {report_path}")
