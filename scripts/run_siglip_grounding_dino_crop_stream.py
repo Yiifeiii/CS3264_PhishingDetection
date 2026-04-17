@@ -39,6 +39,7 @@ from run_siglip_ocr_crop_stream import (  # noqa: E402
     write_csv,
 )
 from hf_utils import load_siglip_processor_and_model  # noqa: E402
+from utils.image_loading import load_image_rgb  # noqa: E402
 
 
 DEFAULT_PROMPT_LABELS = (
@@ -429,7 +430,7 @@ def main():
 
     for entry in tqdm(image_entries, desc="Running GroundingDINO crop stream"):
         image_path = entry["image_path"]
-        image = Image.open(image_path).convert("RGB")
+        image = load_image_rgb(image_path)
         image_width, image_height = image.size
 
         detections = detect_grounding_dino_regions(

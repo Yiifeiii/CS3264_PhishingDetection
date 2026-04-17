@@ -252,7 +252,7 @@ def train_and_evaluate_stream(
             include_confusion=True,
         )
         report_path = reports_dir / f"test_metrics_{model_name}.txt"
-        with open(report_path, "w") as handle:
+        with open(report_path, "w", encoding="utf-8") as handle:
             handle.write(report_text)
 
         predictions_path = predictions_dir / f"test_predictions_{model_name}.csv"
@@ -332,7 +332,7 @@ def build_final_report(summary_rows, output_path: Path, manifest, output_root: P
             + " |"
         )
 
-    with open(output_path, "w") as handle:
+    with open(output_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
 
 

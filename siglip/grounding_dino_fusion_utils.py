@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from dataset import ImagePathDataset
 from feature_utils import get_normalized_image_features
+from utils.image_loading import load_image_rgb
 
 
 CLASS_NAMES = ("real", "fake")
@@ -260,7 +261,7 @@ def build_fixed_holdout_split(source_roots, seed: int, test_total=None, test_per
 
 def write_csv(path: Path, rows, fieldnames):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="") as handle:
+    with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
@@ -269,8 +270,8 @@ def write_csv(path: Path, rows, fieldnames):
 
 def save_json(path: Path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as handle:
-        json.dump(payload, handle, indent=2)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
 
 
 def collate_fn(batch):
@@ -692,46 +693,45 @@ def build_grounding_dino_embeddings(
         )
         image_output_dir.mkdir(parents=True, exist_ok=True)
 
-        with Image.open(image_path) as image_file:
-            image = image_file.convert("RGB")
-            image_width, image_height = image.size
-            active_prompt_labels = prompt_labels_for_source(
-                row["source_name"],
-                fallback_prompt_labels=prompt_labels,
-                chat_prompt_labels=chat_prompt_labels,
-                social_prompt_labels=social_prompt_labels,
-            )
+        image = load_image_rgb(image_path)
+        image_width, image_height = image.size
+        active_prompt_labels = prompt_labels_for_source(
+            row["source_name"],
+            fallback_prompt_labels=prompt_labels,
+            chat_prompt_labels=chat_prompt_labels,
+            social_prompt_labels=social_prompt_labels,
+        )
 
-            try:
-                detections = detect_grounding_dino_regions(
-                    image=image,
-                    processor=detector_processor,
-                    model=detector_model,
-                    device=device,
-                    prompt_labels=active_prompt_labels,
-                    box_threshold=box_threshold,
-                    text_threshold=text_threshold,
-                )
-                candidates = build_grounding_dino_candidates(
-                    detections,
-                    image_width=image_width,
-                    image_height=image_height,
-                    padding_ratio=padding_ratio,
-                )
-            except Exception:
-                detections = []
-                candidates = [
-                    {
-                        "candidate_type": "fallback_full_image",
-                        "bbox": [0, 0, image_width, image_height],
-                        "texts": [],
-                        "ocr_confidence_mean": 0.0,
-                        "ocr_confidence_max": 0.0,
-                        "ocr_region_count": 0,
-                        "score_hint": 0.0,
-                        "sources": [],
-                    }
-                ]
+        try:
+            detections = detect_grounding_dino_regions(
+                image=image,
+                processor=detector_processor,
+                model=detector_model,
+                device=device,
+                prompt_labels=active_prompt_labels,
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+            )
+            candidates = build_grounding_dino_candidates(
+                detections,
+                image_width=image_width,
+                image_height=image_height,
+                padding_ratio=padding_ratio,
+            )
+        except Exception:
+            detections = []
+            candidates = [
+                {
+                    "candidate_type": "fallback_full_image",
+                    "bbox": [0, 0, image_width, image_height],
+                    "texts": [],
+                    "ocr_confidence_mean": 0.0,
+                    "ocr_confidence_max": 0.0,
+                    "ocr_region_count": 0,
+                    "score_hint": 0.0,
+                    "sources": [],
+                }
+            ]
 
             candidates = rank_grounding_candidates(
                 candidates,
@@ -878,8 +878,9 @@ def build_grounding_dino_embeddings(
                     }
                 )
 
-            for crop_image in crop_images:
-                crop_image.close()
+        for crop_image in crop_images:
+            crop_image.close()
+        image.close()
 
         embeddings.append(pooled_embedding)
         labels.append(int(row["label_id"]))

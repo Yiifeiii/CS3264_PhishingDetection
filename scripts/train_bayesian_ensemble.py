@@ -102,6 +102,47 @@ def load_scores(csv_path: Path, feature_names: list[str]) -> tuple[np.ndarray, n
     return X, y, filenames
 
 
+def load_score_rows(csv_path: Path) -> list[dict]:
+    with csv_path.open(encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def feature_presence_mask(rows: list[dict], feature_name: str) -> np.ndarray:
+    return np.array([bool(str(row.get(feature_name, "")).strip()) for row in rows], dtype=bool)
+
+
+def best_threshold_by_accuracy(train_probs: np.ndarray, y_train: np.ndarray) -> float:
+    if train_probs.size == 0:
+        return 0.5
+
+    candidates = np.unique(train_probs)
+    candidates = np.concatenate(([0.0], candidates, [0.5, 1.0]))
+    best_threshold = 0.5
+    best_accuracy = -1.0
+
+    for threshold in np.unique(candidates):
+        preds = (train_probs >= threshold).astype(int)
+        acc = accuracy_score(y_train, preds)
+        if acc > best_accuracy:
+            best_accuracy = acc
+            best_threshold = float(threshold)
+
+    return best_threshold
+
+
+def weighted_average_with_fallback(
+    X: np.ndarray,
+    img_idx: int,
+    txt_idx: int,
+    text_present_mask: np.ndarray,
+    image_weight: float = 0.35,
+) -> np.ndarray:
+    probs = weighted_average_baseline(X, img_idx, txt_idx, image_weight=image_weight)
+    probs = probs.copy()
+    probs[~text_present_mask] = X[~text_present_mask, img_idx]
+    return probs
+
+
 # ── Metrics ─────────────────────────────────────────────────────────
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None = None) -> dict:
@@ -254,11 +295,19 @@ def main() -> int:
             print(f"ERROR: {p} not found. Run extract_ensemble_scores.py first.")
             return 1
 
+    train_rows = load_score_rows(train_csv)
+    test_rows = load_score_rows(test_csv)
     X_train, y_train, _ = load_scores(train_csv, feature_names)
     X_test, y_test, _ = load_scores(test_csv, feature_names)
+    train_text_present = feature_presence_mask(train_rows, TEXT_FEATURE)
+    test_text_present = feature_presence_mask(test_rows, TEXT_FEATURE)
     print(f"Train: {X_train.shape[0]} samples, Test: {X_test.shape[0]} samples")
     print(f"Train class balance: {np.sum(y_train==0)} legit, {np.sum(y_train==1)} phishing")
     print(f"Test class balance: {np.sum(y_test==0)} legit, {np.sum(y_test==1)} phishing")
+    print(
+        f"Text-present rows: train={int(train_text_present.sum())}/{len(train_text_present)}, "
+        f"test={int(test_text_present.sum())}/{len(test_text_present)}"
+    )
 
     report: dict = {"features": feature_names, "results": {}}
 
@@ -273,14 +322,45 @@ def main() -> int:
     print(f"\n[Baseline] fuse_siglip_DINO alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
 
     # ── Baseline 2: ocr_ollama_distilbert alone ─────────────────────
-    probs = X_test[:, txt_idx]
-    preds = (probs >= 0.5).astype(int)
-    m = compute_metrics(y_test, preds, probs)
-    report["results"]["ocr_ollama_distilbert_alone"] = m
-    print(f"[Baseline] ocr_ollama_distilbert alone: acc={m['accuracy']:.4f} f1={m['f1']:.4f}")
+    if train_text_present.any() and test_text_present.any():
+        train_text_probs = X_train[train_text_present, txt_idx]
+        train_text_labels = y_train[train_text_present]
+        test_text_probs = X_test[test_text_present, txt_idx]
+        test_text_labels = y_test[test_text_present]
+        text_threshold = best_threshold_by_accuracy(train_text_probs, train_text_labels)
+        preds = (test_text_probs >= text_threshold).astype(int)
+        m = compute_metrics(test_text_labels, preds, test_text_probs)
+        m["threshold"] = float(text_threshold)
+        m["rows_used_train"] = int(train_text_present.sum())
+        m["rows_used_test"] = int(test_text_present.sum())
+        report["results"]["ocr_ollama_distilbert_alone"] = m
+        print(
+            f"[Baseline] ocr_ollama_distilbert alone: acc={m['accuracy']:.4f} "
+            f"f1={m['f1']:.4f} threshold={text_threshold:.4f} "
+            f"(rows used: train={m['rows_used_train']}, test={m['rows_used_test']})"
+        )
+    else:
+        m = {
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "roc_auc": 0.0,
+            "threshold": None,
+            "rows_used_train": int(train_text_present.sum()),
+            "rows_used_test": int(test_text_present.sum()),
+        }
+        report["results"]["ocr_ollama_distilbert_alone"] = m
+        print("[Baseline] ocr_ollama_distilbert alone: no text-present rows available")
 
     # ── Baseline 3: Weighted average (35/65) ────────────────────────
-    wa_probs = weighted_average_baseline(X_test, img_idx, txt_idx)
+    wa_probs = weighted_average_with_fallback(
+        X_test,
+        img_idx,
+        txt_idx,
+        test_text_present,
+        image_weight=0.35,
+    )
     preds = (wa_probs >= 0.5).astype(int)
     m = compute_metrics(y_test, preds, wa_probs)
     report["results"]["weighted_average_35_65"] = m

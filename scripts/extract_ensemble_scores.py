@@ -66,6 +66,16 @@ def parse_args() -> argparse.Namespace:
         help="Root of the Grounding DINO fusion holdout output.",
     )
     p.add_argument(
+        "--ocr-csv",
+        default=None,
+        help="Optional saved OCR CSV to reuse instead of live OCR where possible.",
+    )
+    p.add_argument(
+        "--allow-partial-ocr",
+        action="store_true",
+        help="Allow rows with no saved OCR match to remain blank.",
+    )
+    p.add_argument(
         "--ollama-model",
         default=None,
         help="Ollama vision model name (default: Config.OCR_OLLAMA_MODEL).",
@@ -85,6 +95,11 @@ def parse_args() -> argparse.Namespace:
         "--text-model-path",
         default=None,
         help="DistilBERT checkpoint path (default: Config.TEXT_PHISHING_MODEL_NAME).",
+    )
+    p.add_argument(
+        "--text-model",
+        default=None,
+        help="Alias for --text-model-path.",
     )
     p.add_argument(
         "--output-dir",
@@ -121,6 +136,39 @@ def load_split_csv(csv_path: Path) -> list[dict]:
     return rows
 
 
+def _normalize_path_key(path_str: str) -> str:
+    return str(Path(path_str)).replace("/", "\\").lower()
+
+
+def load_saved_ocr(csv_path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Return OCR maps keyed by normalized path and lowercased basename."""
+    by_path: dict[str, str] = {}
+    by_name: dict[str, str] = {}
+
+    with csv_path.open(encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            text = str(row.get("text") or "").strip()
+            error = str(row.get("error") or "").strip()
+            if not text or error:
+                continue
+
+            candidates: list[str] = []
+            for key in ("image_path", "path", "text_source_path", "live_image_path"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    candidates.append(value)
+
+            for candidate in candidates:
+                by_path.setdefault(_normalize_path_key(candidate), text)
+                by_name.setdefault(Path(candidate).name.lower(), text)
+
+            filename = str(row.get("filename") or "").strip()
+            if filename:
+                by_name.setdefault(Path(filename).name.lower(), text)
+
+    return by_path, by_name
+
+
 # ── Model B: Ollama OCR + DistilBERT ────────────────────────────────
 
 @torch.no_grad()
@@ -129,20 +177,45 @@ def extract_ocr_distilbert_scores(
     ocr: OCRService,
     processor: OCRTextProcessor,
     analyzer: TextRiskAnalyzer,
+    saved_ocr_by_path: dict[str, str] | None = None,
+    saved_ocr_by_name: dict[str, str] | None = None,
+    allow_partial_ocr: bool = False,
 ) -> dict[str, dict]:
     """Return {image_path: {ocr_distilbert_combined, _heuristic, _model}}."""
     result: dict[str, dict] = {}
     total = len(image_paths)
+    matched_saved = 0
+    missing_saved = 0
+    live_used = 0
 
     for i, img_path in enumerate(image_paths, 1):
         fname = Path(img_path).name
-        print(f"    [{i}/{total}] Ollama OCR: {fname}", flush=True)
+        print(f"    [{i}/{total}] OCR: {fname}", flush=True)
 
-        try:
-            raw_text = ocr.extract_text(img_path)
-        except Exception as exc:
-            print(f"      WARNING: OCR failed ({exc}); using empty text")
-            raw_text = ""
+        raw_text = ""
+        if saved_ocr_by_path is not None or saved_ocr_by_name is not None:
+            raw_text = (
+                (saved_ocr_by_path or {}).get(_normalize_path_key(img_path))
+                or (saved_ocr_by_name or {}).get(fname.lower(), "")
+            )
+            if raw_text:
+                matched_saved += 1
+                print("      source: saved OCR", flush=True)
+            else:
+                missing_saved += 1
+                if not allow_partial_ocr:
+                    raise RuntimeError(
+                        f"no saved OCR row matched '{img_path}'. "
+                        "Use --allow-partial-ocr to keep text blank."
+                    )
+                print("      WARNING: no saved OCR match; leaving text blank", flush=True)
+        else:
+            live_used += 1
+            try:
+                raw_text = ocr.extract_text(img_path)
+            except Exception as exc:
+                print(f"      WARNING: OCR failed ({exc}); using empty text")
+                raw_text = ""
 
         processed = processor.process(raw_text or "")
         processed_text = str(processed.get("text") or "").strip()
@@ -159,6 +232,13 @@ def extract_ocr_distilbert_scores(
             "ocr_distilbert_heuristic": heuristic,
             "ocr_distilbert_model": model_score,
         }
+
+    if saved_ocr_by_path is not None or saved_ocr_by_name is not None:
+        print(
+            f"  OCR summary: matched_saved={matched_saved}/{total}, "
+            f"missing_saved={missing_saved}/{total}, live_used={live_used}",
+            flush=True,
+        )
 
     return result
 
@@ -192,6 +272,9 @@ def build_split(
     ocr: OCRService,
     processor: OCRTextProcessor,
     analyzer: TextRiskAnalyzer,
+    saved_ocr_by_path: dict[str, str] | None = None,
+    saved_ocr_by_name: dict[str, str] | None = None,
+    allow_partial_ocr: bool = False,
 ) -> list[dict]:
     print(f"\n=== Processing {split_name} split ({len(split_rows)} images) ===")
 
@@ -201,6 +284,9 @@ def build_split(
         ocr=ocr,
         processor=processor,
         analyzer=analyzer,
+        saved_ocr_by_path=saved_ocr_by_path,
+        saved_ocr_by_name=saved_ocr_by_name,
+        allow_partial_ocr=allow_partial_ocr,
     )
 
     out_rows: list[dict] = []
@@ -255,8 +341,9 @@ def main() -> int:
             return 1
 
     cfg = Config()
-    if args.text_model_path:
-        cfg.TEXT_PHISHING_MODEL_NAME = args.text_model_path
+    text_model_path = args.text_model or args.text_model_path
+    if text_model_path:
+        cfg.TEXT_PHISHING_MODEL_NAME = text_model_path
 
     ollama_model = args.ollama_model or cfg.OCR_OLLAMA_MODEL
     ollama_host = args.ollama_host or cfg.OCR_OLLAMA_HOST
@@ -268,7 +355,10 @@ def main() -> int:
 
     print(f"Model A (fuse_siglip_DINO): fusion_concat_siglip + lightgbm")
     print(f"  + guardrail signal: grounding_dino_crop_siglip + lightgbm (crop_siglip_dino_prob)")
-    print(f"Model B (ocr_ollama_distilbert): Ollama '{ollama_model}' @ {ollama_host} + DistilBERT")
+    if args.ocr_csv:
+        print(f"Model B (ocr_ollama_distilbert): saved OCR CSV + DistilBERT")
+    else:
+        print(f"Model B (ocr_ollama_distilbert): Ollama '{ollama_model}' @ {ollama_host} + DistilBERT")
 
     ocr = OCRService(
         languages=list(cfg.OCR_LANGUAGES),
@@ -281,6 +371,18 @@ def main() -> int:
     )
     processor = OCRTextProcessor(cfg)
     analyzer = TextRiskAnalyzer(cfg)
+    saved_ocr_by_path: dict[str, str] | None = None
+    saved_ocr_by_name: dict[str, str] | None = None
+    if args.ocr_csv:
+        ocr_csv = Path(args.ocr_csv)
+        if not ocr_csv.exists():
+            print(f"ERROR: OCR CSV not found at {ocr_csv}")
+            return 1
+        saved_ocr_by_path, saved_ocr_by_name = load_saved_ocr(ocr_csv)
+        print(
+            f"  Loaded saved OCR cache: path_keys={len(saved_ocr_by_path)}, "
+            f"filename_keys={len(saved_ocr_by_name)}"
+        )
 
     for split_name in ["train", "test"]:
         split_csv = split_dir / f"{split_name}_samples.csv"
@@ -306,6 +408,9 @@ def main() -> int:
             ocr=ocr,
             processor=processor,
             analyzer=analyzer,
+            saved_ocr_by_path=saved_ocr_by_path,
+            saved_ocr_by_name=saved_ocr_by_name,
+            allow_partial_ocr=args.allow_partial_ocr,
         )
 
         out_path = output_dir / f"{split_name}_scores.csv"

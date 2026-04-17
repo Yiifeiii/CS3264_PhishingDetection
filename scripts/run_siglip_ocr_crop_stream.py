@@ -24,6 +24,7 @@ if str(SIGLIP_ROOT) not in sys.path:
 
 from ocr.ocr_service import OCRService  # noqa: E402
 from utils.config import Config  # noqa: E402
+from utils.image_loading import load_image_rgb  # noqa: E402
 from classifier_utils import compute_metrics, predict_positive_scores  # noqa: E402
 from feature_utils import get_normalized_image_features  # noqa: E402
 from hf_utils import load_siglip_processor_and_model  # noqa: E402
@@ -940,7 +941,7 @@ def main():
     for entry in tqdm(image_entries, desc="Running OCR crop stream"):
         if existing_crops_root is None:
             image_path = entry["image_path"]
-            image = Image.open(image_path).convert("RGB")
+            image = load_image_rgb(image_path)
             image_width, image_height = image.size
 
             regions = ocr.detect_text_regions(

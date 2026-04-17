@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import List, Tuple
-from PIL import Image
 
 from torch.utils.data import Dataset
+from utils.image_loading import load_image_rgb
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"}
 
@@ -28,5 +28,5 @@ class ImagePathDataset(Dataset):
 
     def __getitem__(self, idx):
         image_path, label = self.samples[idx]
-        image = Image.open(image_path).convert("RGB")
+        image = load_image_rgb(image_path)
         return image, label, image_path

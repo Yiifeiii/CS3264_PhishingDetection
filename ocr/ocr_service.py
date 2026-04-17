@@ -8,6 +8,7 @@ from urllib import request
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from utils.image_loading import load_image_rgb
 
 try:
     import easyocr
@@ -208,7 +209,7 @@ class OCRService:
         return self._pick_best_texts(*candidates)
 
     def _load_image_rgb(self, image_path: str):
-        return Image.open(image_path).convert("RGB")
+        return load_image_rgb(image_path)
 
     def _preprocess_for_ocr(self, image):
         if not isinstance(image, Image.Image):

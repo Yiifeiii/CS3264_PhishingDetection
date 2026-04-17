@@ -1,17 +1,17 @@
 import argparse
 import joblib
 import torch
-from PIL import Image
 
 from classifier_utils import MODEL_CHOICES, get_model_path
 from config import CLASS_NAMES, MODEL_NAME, DEVICE
 from feature_utils import get_normalized_image_features
 from hf_utils import load_siglip_processor_and_model
+from utils.image_loading import load_image_rgb
 
 
 @torch.no_grad()
 def embed_image(image_path, processor, model):
-    image = Image.open(image_path).convert("RGB")
+    image = load_image_rgb(image_path)
     inputs = processor(images=image, return_tensors="pt")
     inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
 

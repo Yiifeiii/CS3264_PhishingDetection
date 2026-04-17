@@ -48,6 +48,7 @@ if str(SIGLIP_ROOT) not in sys.path:
 
 from ocr.ocr_service import OCRService
 from utils.config import Config
+from utils.image_loading import load_image_rgb
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.text_risk_analyzer import TextRiskAnalyzer
 
@@ -273,8 +274,7 @@ class BayesianPredictor:
 
     def predict(self, image_path: str, source_name: str = "chat") -> dict:
         # Image branch
-        with Image.open(image_path) as raw:
-            image = raw.convert("RGB")
+        image = load_image_rgb(image_path)
 
         global_feat = embed_global(
             image, self.siglip_processor, self.siglip_model, self.device,
