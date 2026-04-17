@@ -99,6 +99,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--allow-partial-ocr",
+        action="store_true",
+        help=(
+            "Allow continuing when only part of the image-branch split can be mapped to the "
+            "provided manifest/OCR CSV. Unmapped rows will keep blank text scores and later "
+            "be imputed to neutral values by the ensemble trainer."
+        ),
+    )
+    p.add_argument(
+        "--fill-missing-ocr-live",
+        action="store_true",
+        help=(
+            "When --ocr-csv is provided, reuse saved OCR rows first and then run live Ollama OCR "
+            "for any images still missing text."
+        ),
+    )
+    p.add_argument(
+        "--chat-root",
+        default="data/chat",
+        help="Local root used to resolve chat images for live OCR fallback.",
+    )
+    p.add_argument(
+        "--social-root",
+        default="data/social",
+        help="Local root used to resolve social images for live OCR fallback.",
+    )
+    p.add_argument(
         "--output-dir",
         default="artifacts/ensemble",
         help="Directory for output CSVs.",
@@ -142,6 +169,13 @@ def load_ocr_rows(csv_path: Path) -> dict[str, dict]:
     return rows_by_path
 
 
+def resolve_local_path(raw_path: str) -> Path:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path.resolve()
+    return (PROJECT_ROOT / path).resolve()
+
+
 def load_fusion_scores(embed_file: Path, clf_path: Path) -> dict[str, tuple[int, float]]:
     """Return {stored_image_path: (label, fake_prob)} from embeddings + classifier."""
     data = np.load(embed_file, allow_pickle=True)
@@ -183,30 +217,41 @@ def build_rows_from_manifest_and_embeddings(
     split_name: str,
     embed_file: Path,
     manifest_rows: list[dict],
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], dict[str, int]]:
     data = np.load(embed_file, allow_pickle=True)
     paths = data["paths"]
     labels = data["y"]
 
-    manifest_by_slug = {
+    manifest_by_split_slug = {
         manifest_slug(row): row
         for row in manifest_rows
         if str(row.get("split") or "").strip().lower() == split_name
     }
+    manifest_by_any_slug = {
+        manifest_slug(row): row
+        for row in manifest_rows
+    }
 
     rows: list[dict] = []
-    matched = 0
+    matched_same_split = 0
+    matched_any_split = 0
     unmatched = 0
     for stored_path, label in zip(paths, labels):
         stored_path_str = str(stored_path)
         filename = PurePosixPath(stored_path_str.replace("\\", "/")).name
-        manifest_row = manifest_by_slug.get(filename.lower())
+        manifest_row = manifest_by_split_slug.get(filename.lower())
         if manifest_row is not None:
-            matched += 1
+            matched_same_split += 1
+            matched_any_split += 1
             original_path = str(manifest_row.get("original_path") or stored_path_str)
         else:
-            unmatched += 1
-            original_path = stored_path_str
+            manifest_row = manifest_by_any_slug.get(filename.lower())
+            if manifest_row is not None:
+                matched_any_split += 1
+                original_path = str(manifest_row.get("original_path") or stored_path_str)
+            else:
+                unmatched += 1
+                original_path = stored_path_str
 
         rows.append(
             {
@@ -224,7 +269,11 @@ def build_rows_from_manifest_and_embeddings(
             "back to manifest original_path values."
         )
 
-    return rows, matched
+    return rows, {
+        "matched_same_split": matched_same_split,
+        "matched_any_split": matched_any_split,
+        "unmatched": unmatched,
+    }
 
 
 def analyze_raw_text(raw_text: str, processor: OCRTextProcessor, analyzer: TextRiskAnalyzer) -> dict:
@@ -245,6 +294,40 @@ def analyze_raw_text(raw_text: str, processor: OCRTextProcessor, analyzer: TextR
     }
 
 
+def parse_slug_filename(filename: str) -> tuple[str, str, str] | None:
+    parts = str(filename or "").split("__", 2)
+    if len(parts) != 3:
+        return None
+    source_name, label_name, basename = (part.strip() for part in parts)
+    if not source_name or not label_name or not basename:
+        return None
+    return source_name.lower(), label_name.lower(), basename
+
+
+def resolve_live_image_path(row: dict, source_roots: dict[str, Path]) -> Path | None:
+    for key in ("text_source_path", "image_path"):
+        candidate_raw = str(row.get(key) or "").strip()
+        if not candidate_raw:
+            continue
+        candidate = Path(candidate_raw)
+        if candidate.exists():
+            return candidate.resolve()
+
+    slug = parse_slug_filename(str(row.get("filename") or ""))
+    if slug is None:
+        return None
+
+    source_name, label_name, basename = slug
+    source_root = source_roots.get(source_name)
+    if source_root is None:
+        return None
+
+    candidate = (source_root / label_name / basename).resolve()
+    if candidate.exists():
+        return candidate
+    return None
+
+
 @torch.no_grad()
 def extract_live_ocr_distilbert_scores(
     rows: list[dict],
@@ -258,7 +341,7 @@ def extract_live_ocr_distilbert_scores(
     for i, row in enumerate(rows, 1):
         image_key = str(row["image_path"])
         text_source_path = str(row["text_source_path"])
-        fname = str(row["filename"])
+        fname = safe_console_text(str(row["filename"]))
         print(f"    [{i}/{total}] Ollama OCR: {fname}", flush=True)
 
         try:
@@ -276,43 +359,133 @@ def extract_live_ocr_distilbert_scores(
 def extract_saved_ocr_distilbert_scores(
     rows: list[dict],
     ocr_rows_by_path: dict[str, dict],
+    ocr: OCRService | None,
     processor: OCRTextProcessor,
     analyzer: TextRiskAnalyzer,
-) -> dict[str, dict]:
+    source_roots: dict[str, Path],
+    cache_path: Path | None = None,
+    merged_cache_path: Path | None = None,
+) -> tuple[dict[str, dict], list[dict]]:
     result: dict[str, dict] = {}
+    cache_rows: list[dict] = []
     total = len(rows)
 
     for i, row in enumerate(rows, 1):
         image_key = str(row["image_path"])
         text_source_path = str(row["text_source_path"])
-        fname = str(row["filename"])
+        fname = safe_console_text(str(row["filename"]))
         print(f"    [{i}/{total}] Saved OCR: {fname}", flush=True)
 
         ocr_row = ocr_rows_by_path.get(normalize_path_key(text_source_path))
         raw_text = ""
+        error_text = ""
+        ocr_source = "saved"
+        local_live_path = ""
+        model_name = ""
         if ocr_row is None:
-            print(f"      WARNING: no OCR CSV row for {text_source_path}")
+            ocr_source = "missing"
+            print(f"      WARNING: no OCR CSV row for {safe_console_text(text_source_path)}")
         else:
+            model_name = str(ocr_row.get("model") or "").strip()
             error_text = str(ocr_row.get("error") or "").strip()
             if error_text:
-                print(f"      WARNING: OCR CSV row has error for {fname}: {error_text}")
+                ocr_source = "saved_error"
+                print(
+                    f"      WARNING: OCR CSV row has error for {fname}: "
+                    f"{safe_console_text(error_text)}"
+                )
             else:
                 raw_text = str(ocr_row.get("text") or "")
 
-        result[image_key] = analyze_raw_text(raw_text, processor, analyzer)
+        if (not raw_text) and ocr is not None:
+            live_path = resolve_live_image_path(row, source_roots)
+            if live_path is None:
+                if ocr_source == "missing":
+                    print(f"      WARNING: could not resolve a local image path for {fname}")
+            else:
+                local_live_path = str(live_path)
+                print(f"      live OCR fallback: {safe_console_text(local_live_path)}")
+                try:
+                    raw_text = ocr.extract_text(str(live_path)) or ""
+                    error_text = ""
+                    ocr_source = "live"
+                    model_name = str(getattr(ocr, "ollama_model", "") or "")
+                    if raw_text.strip():
+                        print(
+                            f"      live OCR result: {len(raw_text.strip())} chars | "
+                            f"{preview_text(raw_text)}"
+                        )
+                    else:
+                        print("      WARNING: live OCR returned empty text")
+                except Exception as exc:
+                    error_text = str(exc)
+                    ocr_source = "live_error"
+                    model_name = str(getattr(ocr, "ollama_model", "") or "")
+                    print(
+                        f"      WARNING: live OCR failed for {fname}: "
+                        f"{safe_console_text(error_text)}"
+                    )
 
-    return result
+        ocr_rows_by_path[normalize_path_key(text_source_path)] = {
+            "path": text_source_path,
+            "model": model_name,
+            "text": raw_text,
+            "error": error_text,
+        }
+        result[image_key] = analyze_raw_text(raw_text, processor, analyzer)
+        cache_row = {
+            "path": text_source_path,
+            "model": model_name,
+            "image_path": image_key,
+            "filename": str(row["filename"]),
+            "text_source_path": text_source_path,
+            "live_image_path": local_live_path,
+            "ocr_source": ocr_source,
+            "text": raw_text,
+            "error": error_text,
+        }
+        cache_rows.append(cache_row)
+        if cache_path is not None:
+            append_csv_row(cache_path, cache_row)
+        if merged_cache_path is not None:
+            append_csv_row(merged_cache_path, cache_row)
+
+    return result, cache_rows
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
+        path.write_text("", encoding="utf-8")
         return
     fieldnames = list(rows[0].keys())
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def append_csv_row(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(row.keys())
+    write_header = (not path.exists()) or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def safe_console_text(text: str) -> str:
+    normalized = str(text)
+    return normalized.encode("cp1252", errors="backslashreplace").decode("cp1252")
+
+
+def preview_text(text: str, limit: int = 120) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return safe_console_text(normalized)
+    return safe_console_text(normalized[:limit] + "...")
 
 
 def _round_or_na(val) -> object:
@@ -409,7 +582,12 @@ def resolve_image_layout(fusion_root: Path) -> dict[str, object]:
 def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     fusion_root = Path(args.fusion_root)
+    source_roots = {
+        "chat": resolve_local_path(args.chat_root),
+        "social": resolve_local_path(args.social_root),
+    }
 
     try:
         layout = resolve_image_layout(fusion_root)
@@ -472,6 +650,15 @@ def main() -> int:
             "Model B (ocr_ollama_distilbert): saved OCR CSV + DistilBERT "
             f"(text model: {cfg.TEXT_PHISHING_MODEL_NAME})"
         )
+        if args.fill_missing_ocr_live:
+            print(
+                f"  + live fallback enabled via Ollama '{ollama_model}' @ {ollama_host} "
+                f"(timeout: {ollama_timeout}s)"
+            )
+            print(
+                "  + local image roots: "
+                f"chat={source_roots['chat']} social={source_roots['social']}"
+            )
     else:
         print(
             "Model B (ocr_ollama_distilbert): "
@@ -482,7 +669,7 @@ def main() -> int:
     analyzer = TextRiskAnalyzer(cfg)
 
     ocr = None
-    if ocr_rows_by_path is None:
+    if ocr_rows_by_path is None or args.fill_missing_ocr_live:
         ocr = OCRService(
             languages=list(cfg.OCR_LANGUAGES),
             gpu=(cfg.DEVICE == "cuda"),
@@ -495,6 +682,10 @@ def main() -> int:
 
     fused_embed_dir = Path(layout["fused_embed_dir"])
     crop_embed_dir = Path(layout["crop_embed_dir"]) if layout["crop_embed_dir"] else None
+    resolved_cache_rows: list[dict] = []
+    resolved_cache_path = output_dir / "resolved_ocr_cache.csv"
+    if resolved_cache_path.exists():
+        resolved_cache_path.unlink()
 
     for split_name in ["train", "test"]:
         fused_embed_file = fused_embed_dir / f"{split_name}_embeddings.npz"
@@ -503,24 +694,40 @@ def main() -> int:
             continue
 
         if manifest_rows is not None:
-            split_rows, manifest_matches = build_rows_from_manifest_and_embeddings(
+            split_rows, mapping_stats = build_rows_from_manifest_and_embeddings(
                 split_name=split_name,
                 embed_file=fused_embed_file,
                 manifest_rows=manifest_rows,
             )
-            coverage = manifest_matches / max(len(split_rows), 1)
+            same_split_matches = mapping_stats["matched_same_split"]
+            total_matches = mapping_stats["matched_any_split"]
+            same_split_coverage = same_split_matches / max(len(split_rows), 1)
+            coverage = total_matches / max(len(split_rows), 1)
             print(
                 f"  Manifest mapping coverage for {split_name}: "
-                f"{manifest_matches}/{len(split_rows)} ({coverage:.1%})"
+                f"same-split {same_split_matches}/{len(split_rows)} ({same_split_coverage:.1%}), "
+                f"any-split {total_matches}/{len(split_rows)} ({coverage:.1%})"
             )
             if ocr_rows_by_path is not None and coverage < 0.95:
-                print(
-                    "ERROR: manifest mapping coverage is too low for saved OCR reuse. "
+                message = (
+                    "manifest mapping coverage is too low for saved OCR reuse. "
                     "The image-branch split does not match the provided manifest. "
                     "Regenerate matching image-branch artifacts or use a manifest/OCR CSV "
-                    "from the same split as the embeddings."
+                    "from the same dataset as the embeddings."
                 )
-                return 1
+                if not args.allow_partial_ocr and not args.fill_missing_ocr_live:
+                    print(f"ERROR: {message}")
+                    return 1
+                continuation = []
+                if args.fill_missing_ocr_live:
+                    continuation.append(
+                        "--fill-missing-ocr-live was set, so unmapped rows will try live Ollama OCR"
+                    )
+                if args.allow_partial_ocr:
+                    continuation.append(
+                        "--allow-partial-ocr was set, so any rows still unresolved will keep blank text scores"
+                    )
+                print("WARNING: " + message + " Continuing because " + " and ".join(continuation) + ".")
         else:
             split_dir = Path(layout["split_dir"])
             split_csv = split_dir / f"{split_name}_samples.csv"
@@ -539,12 +746,22 @@ def main() -> int:
                 print(f"  WARNING: crop embeddings missing for {split_name}; leaving crop scores blank")
 
         if ocr_rows_by_path is not None:
-            text_scores = extract_saved_ocr_distilbert_scores(
+            cache_path = output_dir / f"{split_name}_ocr_cache.csv"
+            if cache_path.exists():
+                cache_path.unlink()
+            text_scores, cache_rows = extract_saved_ocr_distilbert_scores(
                 rows=split_rows,
                 ocr_rows_by_path=ocr_rows_by_path,
+                ocr=ocr,
                 processor=processor,
                 analyzer=analyzer,
+                source_roots=source_roots,
+                cache_path=cache_path,
+                merged_cache_path=resolved_cache_path,
             )
+            write_csv(cache_path, cache_rows)
+            resolved_cache_rows.extend(cache_rows)
+            print(f"  Saved OCR cache: {cache_path} ({len(cache_rows)} rows)")
         else:
             assert ocr is not None
             text_scores = extract_live_ocr_distilbert_scores(
@@ -565,6 +782,13 @@ def main() -> int:
         out_path = output_dir / f"{split_name}_scores.csv"
         write_csv(out_path, rows)
         print(f"  Saved: {out_path} ({len(rows)} rows)")
+
+    if resolved_cache_rows:
+        merged_cache_by_path: dict[str, dict] = {}
+        for row in resolved_cache_rows:
+            merged_cache_by_path[normalize_path_key(str(row.get("path") or ""))] = row
+        write_csv(resolved_cache_path, list(merged_cache_by_path.values()))
+        print(f"\nSaved merged OCR cache: {resolved_cache_path} ({len(merged_cache_by_path)} rows)")
 
     return 0
 

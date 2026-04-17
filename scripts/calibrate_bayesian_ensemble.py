@@ -44,7 +44,11 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from train_bayesian_ensemble import (  # noqa: E402
     FEATURE_COLUMNS,
+    IMAGE_FEATURE,
     IMPUTE_VALUE,
+    TEXT_FEATURE,
+    apply_missing_text_fallback,
+    load_feature_presence,
     load_scores,
     tune_logreg,
 )
@@ -111,13 +115,26 @@ def main() -> int:
 
     X_train, y_train, _ = load_scores(train_csv, feature_names)
     X_test, y_test, _ = load_scores(test_csv, feature_names)
+    text_present_train = load_feature_presence(train_csv, TEXT_FEATURE)
+    text_present_test = load_feature_presence(test_csv, TEXT_FEATURE)
+    image_idx = feature_names.index(IMAGE_FEATURE)
     print(f"Features: {feature_names}")
     print(f"Train: {X_train.shape[0]} samples ({int((y_train == 1).sum())} phishing)")
     print(f"Test:  {X_test.shape[0]} samples ({int((y_test == 1).sum())} phishing)")
+    print(
+        f"Text-present rows: train {int(text_present_train.sum())}/{len(text_present_train)}, "
+        f"test {int(text_present_test.sum())}/{len(text_present_test)}"
+    )
 
     # Step 1: tune C on train
     print("\n--- Tuning base LogReg C ---")
-    best_C, cv_acc = tune_logreg(X_train, y_train, args.cv_folds)
+    best_C, cv_acc = tune_logreg(
+        X_train,
+        y_train,
+        args.cv_folds,
+        text_present_mask=text_present_train,
+        image_idx=image_idx,
+    )
 
     def _base_factory() -> LogisticRegression:
         return LogisticRegression(
@@ -130,6 +147,7 @@ def main() -> int:
     # Fit uncalibrated reference for comparison
     uncal = _base_factory().fit(X_train, y_train)
     uncal_prob = uncal.predict_proba(X_test)[:, 1]
+    uncal_prob = apply_missing_text_fallback(uncal_prob, X_test[:, image_idx], text_present_test)
     uncal_ece, _ = expected_calibration_error(y_test, uncal_prob, args.ece_bins)
 
     # Step 2: fit both calibrators with cv=5 (cross-calibration on train)
@@ -144,6 +162,7 @@ def main() -> int:
         _base_factory(), method="sigmoid", cv=cv_splitter
     ).fit(X_train, y_train)
     sig_prob = cal_sigmoid.predict_proba(X_test)[:, 1]
+    sig_prob = apply_missing_text_fallback(sig_prob, X_test[:, image_idx], text_present_test)
     sig_ece, sig_bins = expected_calibration_error(y_test, sig_prob, args.ece_bins)
     sig_brier = float(brier_score_loss(y_test, sig_prob))
     sig_nll = float(log_loss(y_test, sig_prob, labels=[0, 1]))
@@ -159,6 +178,7 @@ def main() -> int:
         ),
     ).fit(X_train, y_train)
     iso_prob = cal_isotonic.predict_proba(X_test)[:, 1]
+    iso_prob = apply_missing_text_fallback(iso_prob, X_test[:, image_idx], text_present_test)
     iso_ece, iso_bins = expected_calibration_error(y_test, iso_prob, args.ece_bins)
     iso_brier = float(brier_score_loss(y_test, iso_prob))
     iso_nll = float(log_loss(y_test, iso_prob, labels=[0, 1]))
@@ -189,6 +209,9 @@ def main() -> int:
         "feature_names": feature_names,
         "base_C": float(best_C),
         "ece_bins": args.ece_bins,
+        "missing_text_policy": "fallback_to_image_only",
+        "image_feature_name": IMAGE_FEATURE,
+        "text_feature_name": TEXT_FEATURE,
     }, out_model)
     print(f"Saved calibrated model to: {out_model}")
 
@@ -200,6 +223,9 @@ def main() -> int:
         "calibration": {
             "ece_bins": args.ece_bins,
             "cv_folds": args.cv_folds,
+            "missing_text_policy": "fallback_to_image_only",
+            "text_present_train_rows": int(text_present_train.sum()),
+            "text_present_test_rows": int(text_present_test.sum()),
             "uncalibrated": {"ece": uncal_ece},
             "sigmoid": {
                 "ece": sig_ece,
