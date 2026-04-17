@@ -36,6 +36,7 @@ class Config:
     OCR_EASYOCR_GROUNDING_TEXT_THRESHOLD = 0.25
     OCR_EASYOCR_GROUNDING_MAX_REGIONS = 6
     OCR_EASYOCR_GROUNDING_PADDING_RATIO = 0.03
+    OCR_EASYOCR_GROUNDING_TEXT_AGGREGATION = "concat"  # valid options: "concat", "max_model", "hybrid_max_model"
     OCR_CHINESE_POLICY = "route"  # valid options: "strip", "skip", "translate", "route"
 
     # Allowlisted contacts suppress email/phone phishing heuristics but do not
@@ -219,6 +220,10 @@ class Config:
     LINK_CREDENTIAL_BONUS = 0.1
     TEXT_RULE_WEIGHT = 0.15
     TEXT_MODEL_WEIGHT = 0.85
+    # Default text score used for fusion/evaluation. "model" disables the
+    # heuristic blend for normal decisions while preserving heuristic signals
+    # for explanations and model-unavailable fallback paths.
+    TEXT_DECISION_SOURCE = "model"  # valid options: "combined", "model", "model_raw"
     # Raw-model boundary used by the centered score normalization:
     # 0.0 -> 0.0, boundary -> 0.5, 1.0 -> 1.0.
     MODEL_POSITIVE_THRESHOLD = 0.83

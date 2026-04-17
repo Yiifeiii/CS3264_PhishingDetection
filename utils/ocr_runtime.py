@@ -40,6 +40,9 @@ def add_ocr_runtime_args(
     easyocr_grounding_text_threshold_default = float(getattr(cfg, "OCR_EASYOCR_GROUNDING_TEXT_THRESHOLD", 0.25))
     easyocr_grounding_max_regions_default = int(getattr(cfg, "OCR_EASYOCR_GROUNDING_MAX_REGIONS", 6))
     easyocr_grounding_padding_ratio_default = float(getattr(cfg, "OCR_EASYOCR_GROUNDING_PADDING_RATIO", 0.03))
+    easyocr_grounding_text_aggregation_default = str(
+        getattr(cfg, "OCR_EASYOCR_GROUNDING_TEXT_AGGREGATION", "concat")
+    )
     transformers_model_default = getattr(cfg, "OCR_TRANSFORMERS_MODEL", DEFAULT_TRANSFORMERS_MODEL)
     transformers_task_prompt_default = getattr(
         cfg,
@@ -115,6 +118,12 @@ def add_ocr_runtime_args(
         type=float,
         default=easyocr_grounding_padding_ratio_default,
         help="Extra padding ratio added around each Grounding DINO crop before EasyOCR.",
+    )
+    parser.add_argument(
+        "--easyocr-grounding-text-aggregation",
+        choices=["concat", "max_model", "hybrid_max_model"],
+        default=easyocr_grounding_text_aggregation_default,
+        help="How grounded OCR crop texts are aggregated before text-model scoring.",
     )
     parser.add_argument(
         "--transformers-model",
@@ -216,6 +225,13 @@ def build_ocr_service(cfg, args: argparse.Namespace) -> OCRService:
                 args,
                 "easyocr_grounding_padding_ratio",
                 getattr(cfg, "OCR_EASYOCR_GROUNDING_PADDING_RATIO", 0.03),
+            )
+        ),
+        easyocr_grounding_text_aggregation=str(
+            getattr(
+                args,
+                "easyocr_grounding_text_aggregation",
+                getattr(cfg, "OCR_EASYOCR_GROUNDING_TEXT_AGGREGATION", "concat"),
             )
         ),
         transformers_model=str(

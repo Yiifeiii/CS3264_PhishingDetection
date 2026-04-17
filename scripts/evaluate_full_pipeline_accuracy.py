@@ -20,6 +20,7 @@ from utils.ocr_runtime import add_ocr_runtime_args, build_ocr_service
 from utils.ocr_text_processor import OCRTextProcessor
 from utils.risk_fusion_service import RiskFusionService
 from utils.text_risk_analyzer import TextRiskAnalyzer
+from utils.text_pipeline_runtime import run_text_pipeline_on_image
 
 
 def parse_args() -> argparse.Namespace:
@@ -235,17 +236,20 @@ def run_pipeline_records(
     for true_label, image_path in dataset:
         image = preprocessor.load_image(str(image_path))
         image_result = infer.predict(image)
-        raw_text = ocr.extract_text(str(image_path))
-        processed = ocr_text_processor.process(raw_text)
-        processed_text = str(processed.get("text") or "")
+        text_runtime = run_text_pipeline_on_image(
+            ocr,
+            ocr_text_processor,
+            text_analyzer,
+            str(image_path),
+        )
+        raw_text = str(text_runtime["raw_text"] or "")
+        processed = text_runtime["processed"]
+        processed_text = str(text_runtime["processed_text"] or "")
         if processed_text.strip():
             summary["images_with_text"] += 1
         else:
             summary["images_without_text"] += 1
-        text_result = text_analyzer.analyze(processed_text)
-        if processed.get("warning"):
-            text_result.setdefault("warnings", []).append(processed["warning"])
-        text_result["ocr_processing"] = processed
+        text_result = text_runtime["text_result"]
         fused_result = risk_fusion.combine(image_result, text_result)
         risk_score = float(fused_result.get("risk_score") or 0.0)
         risk_level = str(fused_result.get("risk_level") or "").strip().lower()

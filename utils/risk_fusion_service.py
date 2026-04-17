@@ -1,10 +1,16 @@
+from utils.text_pipeline_runtime import select_text_decision_score
+
+
 class RiskFusionService:
     def __init__(self, cfg):
         self.cfg = cfg
 
     def combine(self, image_result, text_result):
         image_score = self._image_risk_score(image_result)
-        text_score = float(text_result.get("score", 0.0))
+        text_score = select_text_decision_score(
+            text_result,
+            getattr(self.cfg, "TEXT_DECISION_SOURCE", "combined"),
+        )
 
         image_weight = self.cfg.IMAGE_SCORE_WEIGHT
         text_weight = self.cfg.TEXT_SCORE_WEIGHT

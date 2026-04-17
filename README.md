@@ -43,6 +43,7 @@ To run just the OCR + text phishing pipeline on one image:
 ```bash
 python scripts/run_text_model.py --image data/raw/image4.jpg --ocr-backend transformers --transformers-model florence-community/Florence-2-base-ft
 python scripts/run_text_model.py --image data/raw/image4.jpg --ocr-backend easyocr --easyocr-use-grounding-dino
+python scripts/run_text_model.py --image data/raw/image4.jpg --ocr-backend easyocr --easyocr-use-grounding-dino --easyocr-grounding-text-aggregation max_model
 ```
 
 To evaluate the full multimodal pipeline on the labeled test split:
@@ -51,6 +52,14 @@ To evaluate the full multimodal pipeline on the labeled test split:
 python scripts/evaluate_full_pipeline_accuracy.py
 python scripts/evaluate_full_pipeline_accuracy.py --ocr-backend easyocr --easyocr-use-grounding-dino
 python scripts/evaluate_full_pipeline_accuracy.py --ocr-backend easyocr --easyocr-use-grounding-dino --decision-mode score --auto-threshold-on-val
+```
+
+To run an English-split OCR ablation over the full multimodal pipeline:
+
+```bash
+python scripts/run_english_ocr_ablation.py
+python scripts/run_english_ocr_ablation.py --backends easyocr,easyocr_grounded,llama --objective f1
+python scripts/run_english_ocr_ablation.py --easyocr-text-model artifacts/distilbert_route_pipeline/model --easyocr-grounded-text-model artifacts/distilbert_easyocr_grounded_english/model --llama-text-model artifacts/ollama_ft_raw_strict/model
 ```
 
 This will:
