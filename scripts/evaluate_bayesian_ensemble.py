@@ -3,8 +3,14 @@
 Loads the trained ensemble models from ``artifacts/ensemble/`` and
 produces a detailed comparison report including:
 - Per-method accuracy, precision, recall, F1, ROC-AUC
+- Bootstrap 95% confidence intervals
 - Per-sample predictions CSV for error analysis
-- Feature importance / learned weights interpretation
+- Feature ablation (drop one feature, measure accuracy change)
+- Confusion matrices
+
+The two sub-models being combined are:
+    - Model A: fuse_siglip_DINO          → ``fuse_siglip_dino_prob``
+    - Model B: ocr_ollama_distilbert     → ``ocr_distilbert_combined``
 
 Usage:
     python scripts/evaluate_bayesian_ensemble.py
@@ -22,7 +28,6 @@ import joblib
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
-    classification_report,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -37,16 +42,12 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from train_bayesian_ensemble import NaiveBayesKDE  # noqa: E402,F401
-
-FEATURE_COLUMNS = [
-    "siglip_logreg_prob",
-    "siglip_lightgbm_prob",
-    "siglip_xgboost_prob",
-    "text_combined_score",
-    "text_heuristic_score",
-    "text_preprocess_model_score",
-]
+from train_bayesian_ensemble import (  # noqa: E402,F401
+    FEATURE_COLUMNS,
+    IMAGE_FEATURE,
+    TEXT_FEATURE,
+    NaiveBayesKDE,
+)
 
 IMPUTE_VALUE = 0.5
 
@@ -74,7 +75,7 @@ def load_scores(csv_path: Path, feature_names: list[str]) -> tuple[np.ndarray, n
 
     for i, row in enumerate(rows):
         y[i] = int(row["label"])
-        filenames.append(row["filename"])
+        filenames.append(row.get("filename", row.get("image_path", "")))
         for j, col in enumerate(feature_names):
             val = row.get(col, "").strip()
             if val:
@@ -128,27 +129,23 @@ def main() -> int:
     X_test, y_test, filenames = load_scores(test_csv, feature_names)
     print(f"Test set: {len(y_test)} samples ({np.sum(y_test==0)} legit, {np.sum(y_test==1)} phishing)")
 
-    text_idx = feature_names.index("text_combined_score")
+    img_idx = feature_names.index(IMAGE_FEATURE)
+    txt_idx = feature_names.index(TEXT_FEATURE)
 
-    # Collect all methods and their predictions
     methods: dict[str, dict] = {}
 
-    # Baseline: SigLIP models alone
-    for col in ["siglip_logreg_prob", "siglip_lightgbm_prob", "siglip_xgboost_prob"]:
-        idx = feature_names.index(col)
-        probs = X_test[:, idx]
-        preds = (probs >= 0.5).astype(int)
-        model_name = col.replace("siglip_", "").replace("_prob", "")
-        methods[f"SigLIP {model_name}"] = {"preds": preds, "probs": probs}
-
-    # Baseline: Text combined alone
-    probs = X_test[:, text_idx]
+    # Baseline: fuse_siglip_DINO alone
+    probs = X_test[:, img_idx]
     preds = (probs >= 0.5).astype(int)
-    methods["Text combined alone"] = {"preds": preds, "probs": probs}
+    methods["fuse_siglip_DINO alone"] = {"preds": preds, "probs": probs}
 
-    # Baseline: Weighted average 35/65 (using xgboost)
-    xgboost_idx = feature_names.index("siglip_xgboost_prob")
-    probs = 0.35 * X_test[:, xgboost_idx] + 0.65 * X_test[:, text_idx]
+    # Baseline: ocr_ollama_distilbert alone
+    probs = X_test[:, txt_idx]
+    preds = (probs >= 0.5).astype(int)
+    methods["ocr_ollama_distilbert alone"] = {"preds": preds, "probs": probs}
+
+    # Baseline: Weighted average 35/65
+    probs = 0.35 * X_test[:, img_idx] + 0.65 * X_test[:, txt_idx]
     preds = (probs >= 0.5).astype(int)
     methods["Weighted avg (35/65)"] = {"preds": preds, "probs": probs}
 
@@ -169,9 +166,9 @@ def main() -> int:
         methods["LogReg Bayesian MAP"] = {"preds": preds, "probs": probs}
 
     # Print comparison table
-    print("\n" + "=" * 80)
-    print(f"{'Method':<25} {'Acc':>7} {'Prec':>7} {'Rec':>7} {'F1':>7} {'AUC':>7}  {'Acc 95% CI':>18}")
-    print("-" * 80)
+    print("\n" + "=" * 95)
+    print(f"{'Method':<33} {'Acc':>7} {'Prec':>7} {'Rec':>7} {'F1':>7} {'AUC':>7}  {'Acc 95% CI':>18}")
+    print("-" * 95)
 
     report = {}
     for name, data in methods.items():
@@ -179,7 +176,7 @@ def main() -> int:
         ci = bootstrap_ci(y_test, data["preds"], data["probs"], n_iter=args.bootstrap_n)
         acc_ci = ci["accuracy_ci"]
         print(
-            f"{name:<25} "
+            f"{name:<33} "
             f"{m['accuracy']:>7.4f} "
             f"{m['precision']:>7.4f} "
             f"{m['recall']:>7.4f} "
@@ -189,7 +186,7 @@ def main() -> int:
         )
         report[name] = {**m, **ci}
 
-    print("=" * 80)
+    print("=" * 95)
 
     # Per-sample predictions for error analysis
     per_sample_rows = []
@@ -234,7 +231,6 @@ def main() -> int:
             delta = full_acc - ablated_acc
             print(f"  Drop {feat_name:<35s}: acc={ablated_acc:.4f}  (delta={delta:+.4f})")
 
-    # Save report
     report_path = output_dir / "evaluation_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"\nFull report: {report_path}")
